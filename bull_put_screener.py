@@ -251,12 +251,14 @@ def run_screen():
                 continue
 
             # ── EARNINGS FILTER (NEW CORE LOGIC) ──
-            earnings_date = get_next_earnings_date(t)
+earnings_date = get_next_earnings_date(t)
 
-            if earnings_date is not None:
-                if today <= earnings_date <= datetime.strptime(target, "%Y-%m-%d"):
-                    print(f"  [{ticker}] Skip — earnings during trade window")
-                    continue
+if earnings_date is not None:
+    days_to_earnings = (earnings_date - today).days
+
+    if 0 <= days_to_earnings <= 10:
+        print(f"  [{ticker}] Skip — earnings in {days_to_earnings} days")
+        continue
 
             chain = t.option_chain(target)
             puts = chain.puts
