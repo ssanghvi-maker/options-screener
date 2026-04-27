@@ -1,10 +1,12 @@
 """
-bull_put_screener.py — UPDATED VERSION (with earnings filter)
+bull_put_screener.py — CLEAN VERSION
 
-Additions:
-- Earnings event filter (skip trades with earnings inside DTE window)
-- Full S&P 500 universe
-- Tightened IV/HV + delta + buffer filters
+Includes:
+- S&P 500 universe (CSV source)
+- IV/HV >= 1.4
+- Delta 0.18–0.28
+- Buffer >= 7%
+- Earnings filter (skip next 10 days only)
 """
 
 import yfinance as yf
@@ -13,75 +15,29 @@ import pandas as pd
 from scipy.stats import norm
 from scipy.optimize import brentq
 from datetime import datetime
-import smtplib
-import os
 import time
 import warnings
-import requests
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
 
 warnings.filterwarnings('ignore')
 
-GMAIL_USER         = os.environ.get("GMAIL_USER", "")
-GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "")
-EMAIL_RECIPIENT    = os.environ.get("EMAIL_RECIPIENT", "")
-RISK_FREE_RATE     = 0.05
+RISK_FREE_RATE = 0.05
 
 
-# ─────────────────────────────────────────────
-# S&P 500 UNIVERSE
-# ─────────────────────────────────────────────
+# ─────────────────────────────
+# S&P 500 TICKERS
+# ─────────────────────────────
 
 def get_sp500_tickers():
-    """
-    Load S&P 500 tickers from a public CSV (no lxml dependency)
-    """
     url = "https://datahub.io/core/s-and-p-500-companies/r/constituents.csv"
     df = pd.read_csv(url)
-    tickers = df["Symbol"].tolist()
-    return [t.replace(".", "-") for t in tickers]
+    return [t.replace(".", "-") for t in df["Symbol"].tolist()]
+
 TICKERS = get_sp500_tickers()
 
-# ─────────────────────────────────────────────
-# EARNINGS FILTER (NEW)
-# ─────────────────────────────────────────────
 
-def get_next_earnings_date(ticker_obj):
-    """
-    Robust extraction of next earnings date from yfinance
-    """
-    try:
-        cal = ticker_obj.calendar
-
-        if cal is None:
-            return None
-
-        # Case 1: DataFrame format
-        if isinstance(cal, pd.DataFrame):
-            if "Earnings Date" in cal.index:
-                val = cal.loc["Earnings Date"].values[0]
-                if isinstance(val, (list, tuple, np.ndarray)):
-                    return pd.to_datetime(val[0])
-                return pd.to_datetime(val)
-
-        # Case 2: dict-like format
-        if isinstance(cal, dict):
-            ed = cal.get("Earnings Date")
-            if ed:
-                if isinstance(ed, (list, tuple)):
-                    return pd.to_datetime(ed[0])
-                return pd.to_datetime(ed)
-
-    except:
-        pass
-
-    return None
-
-
-# ─────────────────────────────────────────────
+# ─────────────────────────────
 # BLACK-SCHOLES
-# ─────────────────────────────────────────────
+# ─────────────────────────────
 
 def bs_put_price(S, K, T, r, sigma):
     if T <= 0 or sigma <= 0:
@@ -109,55 +65,78 @@ def implied_vol(price, S, K, T, r):
         return None
 
 
-# ─────────────────────────────────────────────
+# ─────────────────────────────
 # VOLATILITY
-# ─────────────────────────────────────────────
+# ─────────────────────────────
 
 def get_hv_and_ivr(ticker):
     try:
         hist = ticker.history(period='1y')
         returns = hist['Close'].pct_change().dropna()
 
-        hv_window = 30
-        hv_current = returns.tail(hv_window).std() * np.sqrt(252)
+        hv = returns.tail(30).std() * np.sqrt(252)
 
-        rolling = returns.rolling(hv_window).std().dropna() * np.sqrt(252)
+        rolling = returns.rolling(30).std().dropna() * np.sqrt(252)
         hv_max, hv_min = rolling.max(), rolling.min()
 
         if hv_max == hv_min:
             return None, None
 
-        ivr = (hv_current - hv_min) / (hv_max - hv_min) * 100
-        return hv_current, ivr
+        ivr = (hv - hv_min) / (hv_max - hv_min) * 100
+        return hv, ivr
     except:
         return None, None
 
 
-def get_atm_iv(puts, S, T, r):
+def get_atm_iv(puts, S, T):
     try:
         puts = puts.copy()
-        puts['dist'] = abs(puts['strike'] - S)
-        atm = puts.nsmallest(1, 'dist').iloc[0]
+        puts["dist"] = abs(puts["strike"] - S)
+        atm = puts.nsmallest(1, "dist").iloc[0]
 
-        bid, ask = atm['bid'], atm['ask']
+        bid, ask = atm["bid"], atm["ask"]
         if bid <= 0 or ask <= 0:
             return None
 
         mid = (bid + ask) / 2
-        return implied_vol(mid, S, atm['strike'], T, r)
+        return implied_vol(mid, S, atm["strike"], T, RISK_FREE_RATE)
     except:
         return None
 
 
-# ─────────────────────────────────────────────
-# SPREAD FINDER (TIGHT FILTERS)
-# ─────────────────────────────────────────────
+# ─────────────────────────────
+# EARNINGS
+# ─────────────────────────────
 
-def find_best_spread(S, iv, T, puts):
+def get_next_earnings_date(t):
+    try:
+        cal = t.calendar
+
+        if isinstance(cal, pd.DataFrame) and "Earnings Date" in cal.index:
+            val = cal.loc["Earnings Date"].values[0]
+            return pd.to_datetime(val)
+
+        if isinstance(cal, dict):
+            ed = cal.get("Earnings Date")
+            if ed:
+                return pd.to_datetime(ed[0] if isinstance(ed, (list, tuple)) else ed)
+
+    except:
+        pass
+
+    return None
+
+
+# ─────────────────────────────
+# SPREAD FINDER
+# ─────────────────────────────
+
+def find_spread(S, iv, T, puts):
 
     for _, put in puts.iterrows():
-        K_short = put['strike']
-        bid, ask = put['bid'], put['ask']
+        K_short = put["strike"]
+        bid, ask = put["bid"], put["ask"]
+
         if bid <= 0 or ask <= 0:
             continue
 
@@ -167,59 +146,56 @@ def find_best_spread(S, iv, T, puts):
         if delta is None:
             continue
 
-        abs_delta = abs(delta)
-
-        if not (0.18 <= abs_delta <= 0.28):
+        if not (0.18 <= abs(delta) <= 0.28):
             continue
 
         for width in [2, 3, 5, 10]:
             K_long = K_short - width
-            long_put = puts[puts['strike'] == K_long]
-            if long_put.empty:
+            row = puts[puts["strike"] == K_long]
+
+            if row.empty:
                 continue
 
-            lb, la = long_put.iloc[0]['bid'], long_put.iloc[0]['ask']
+            lb, la = row.iloc[0]["bid"], row.iloc[0]["ask"]
             if lb <= 0 or la <= 0:
                 continue
 
-            long_mid = (lb + la) / 2
-            credit = short_mid - long_mid
-
+            credit = short_mid - (lb + la) / 2
             if credit < 0.10:
                 continue
 
             breakeven = K_short - credit
-            buffer_pct = (S - breakeven) / S * 100
+            buffer = (S - breakeven) / S * 100
             cw = credit / width
 
-            if cw >= 0.33 and buffer_pct >= 7:
+            if cw >= 0.33 and buffer >= 7:
                 return {
-                    "short_strike": K_short,
-                    "long_strike": K_long,
-                    "width": width,
-                    "delta": round(abs_delta, 2),
+                    "short": K_short,
+                    "long": K_long,
+                    "delta": round(abs(delta), 2),
                     "credit": round(credit, 2),
-                    "credit_ratio": round(cw * 100, 1),
-                    "breakeven": round(breakeven, 2),
-                    "buffer": round(buffer_pct, 1),
-                    "max_profit": int(credit * 100),
-                    "max_loss": int((width - credit) * 100),
+                    "cw": round(cw * 100, 1),
+                    "buffer": round(buffer, 1),
                 }
 
     return None
 
 
-# ─────────────────────────────────────────────
-# MAIN SCREEN
-# ─────────────────────────────────────────────
+# ─────────────────────────────
+# MAIN
+# ─────────────────────────────
 
 def run_screen():
-    results = []
-    today = datetime.today()
 
-    print(f"S&P 500 Bull Put Screener — {today}")
+    today = datetime.today()
+    today_date = today.date()
+
+    results = []
+
+    print(f"Screener running — {today}")
 
     for ticker in TICKERS:
+
         try:
             t = yf.Ticker(ticker)
 
@@ -227,7 +203,7 @@ def run_screen():
             if hist.empty:
                 continue
 
-            S = hist['Close'].iloc[-1]
+            S = hist["Close"].iloc[-1]
 
             hv, ivr = get_hv_and_ivr(t)
             if hv is None or ivr is None or ivr < 50:
@@ -250,15 +226,15 @@ def run_screen():
             if not target:
                 continue
 
-            # ── EARNINGS FILTER (NEW CORE LOGIC) ──
-earnings_date = get_next_earnings_date(t)
+            # ✅ EARNINGS FILTER (10 DAYS ONLY)
+            earnings_date = get_next_earnings_date(t)
 
-if earnings_date is not None:
-    days_to_earnings = (earnings_date - today).days
+            if earnings_date is not None:
+                ed = earnings_date.date()
+                days = (ed - today_date).days
 
-    if 0 <= days_to_earnings <= 10:
-        print(f"  [{ticker}] Skip — earnings in {days_to_earnings} days")
-        continue
+                if 0 <= days <= 10:
+                    continue
 
             chain = t.option_chain(target)
             puts = chain.puts
@@ -267,37 +243,43 @@ if earnings_date is not None:
 
             T = dte / 365
 
-            atm_iv = get_atm_iv(puts, S, T, RISK_FREE_RATE)
-            if not atm_iv:
+            iv = get_atm_iv(puts, S, T)
+            if not iv:
                 continue
 
-            iv_hv = atm_iv / hv
+            iv_hv = iv / hv
 
             if iv_hv < 1.4:
                 continue
 
-            spread = find_best_spread(S, atm_iv, T, puts)
+            spread = find_spread(S, iv, T, puts)
 
             if spread:
                 results.append({
                     "ticker": ticker,
                     "price": round(S, 2),
                     "ivr": round(ivr, 1),
-                    "iv_hv_ratio": round(iv_hv, 2),
-                    "dte": dte,
-                    "expiry": target,
+                    "iv_hv": round(iv_hv, 2),
                     **spread
                 })
 
-            time.sleep(0.2)
+            time.sleep(0.1)
 
         except:
             continue
 
-    results.sort(key=lambda x: (-x["iv_hv_ratio"], -x["ivr"]))
-    print(f"Done. {len(results)} opportunities.")
+    results.sort(key=lambda x: -x["iv_hv"])
+
+    print(f"\nDone — {len(results)} trades found")
+
+    for r in results[:10]:
+        print(r)
+
     return results
 
+
+if __name__ == "__main__":
+    run_screen()
 
 # ── EMAIL ─────────────────────────────────────────────────────────
 
