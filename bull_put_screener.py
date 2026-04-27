@@ -41,7 +41,7 @@ def get_sp500_tickers():
     df = pd.read_csv(url)
     tickers = df["Symbol"].tolist()
     return [t.replace(".", "-") for t in tickers]
-
+TICKERS = get_sp500_tickers()
 
 # ─────────────────────────────────────────────
 # EARNINGS FILTER (NEW)
