@@ -34,11 +34,13 @@ RISK_FREE_RATE     = 0.05
 # ─────────────────────────────────────────────
 
 def get_sp500_tickers():
-    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-    table = pd.read_html(url)[0]
-    return [t.replace(".", "-") for t in table["Symbol"].tolist()]
-
-TICKERS = get_sp500_tickers()
+    """
+    Load S&P 500 tickers from a public CSV (no lxml dependency)
+    """
+    url = "https://datahub.io/core/s-and-p-500-companies/r/constituents.csv"
+    df = pd.read_csv(url)
+    tickers = df["Symbol"].tolist()
+    return [t.replace(".", "-") for t in tickers]
 
 
 # ─────────────────────────────────────────────
