@@ -20,6 +20,9 @@ import warnings
 
 
 warnings.filterwarnings('ignore')
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+import smtplib
 import os
 
 GMAIL_USER         = os.environ.get("GMAIL_USER", "")
