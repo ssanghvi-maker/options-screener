@@ -18,8 +18,13 @@ from datetime import datetime
 import time
 import warnings
 
-warnings.filterwarnings('ignore')
 
+warnings.filterwarnings('ignore')
+import os
+
+GMAIL_USER         = os.environ.get("GMAIL_USER", "")
+GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "")
+EMAIL_RECIPIENT    = os.environ.get("EMAIL_RECIPIENT", "")
 RISK_FREE_RATE = 0.05
 
 
