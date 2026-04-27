@@ -1,11 +1,12 @@
 """
 bull_put_screener.py
 
-Key fixes vs v1:
-1. Uses BID for short put, ASK for long put — realistic fill prices
-2. IV/HV ratio check — only trades where IV > 1.2x realized vol
-3. Implied vol extracted from ATM options chain
-4. Email as clean table
+Approach:
+- Uses MID price for credits (bid+ask)/2 — what brokers display
+- Adds IV/HV ratio check — only trades where IV > 1.2x realized vol (real edge)
+- Note in email: actual fills ~10-15% below mid on liquid names
+- Table format email
+- Sorted by IV/HV ratio descending
 """
 
 import yfinance as yf
@@ -61,12 +62,10 @@ def bs_put_delta(S, K, T, r, sigma):
 
 
 def implied_vol(market_price, S, K, T, r):
-    """Extract IV from market price."""
     if T <= 0 or market_price <= 0:
         return None
     try:
-        intrinsic = max(K - S, 0)
-        if market_price <= intrinsic + 0.01:
+        if market_price <= max(K - S, 0) + 0.01:
             return None
         def f(sigma):
             return bs_put_price(S, K, T, r, sigma) - market_price
@@ -78,7 +77,6 @@ def implied_vol(market_price, S, K, T, r):
 # ── VOLATILITY ────────────────────────────────────────────────────
 
 def get_hv_and_ivr(ticker_obj, window=30):
-    """30-day HV and IVR proxy from rolling HV."""
     try:
         hist = ticker_obj.history(period='1y')
         if len(hist) < window + 10:
@@ -97,7 +95,6 @@ def get_hv_and_ivr(ticker_obj, window=30):
 
 
 def get_atm_iv(puts, S, T, r):
-    """Get IV from the ATM put using mid price."""
     try:
         p = puts.copy()
         p['dist'] = abs(p['strike'] - S)
@@ -115,36 +112,36 @@ def get_atm_iv(puts, S, T, r):
 # ── SPREAD FINDER ─────────────────────────────────────────────────
 
 def find_best_spread(S, iv_for_delta, T, puts):
-    """
-    Find best spread using REALISTIC fills:
-    Short put = BID (what you receive when selling)
-    Long put  = ASK (what you pay when buying)
-    """
+    """Find best spread using MID price for credits."""
     for _, put in puts.iterrows():
-        K_short   = put['strike']
-        short_bid = put.get('bid', 0)
-        if short_bid <= 0:
+        K_short  = put['strike']
+        s_bid    = put.get('bid', 0)
+        s_ask    = put.get('ask', 0)
+        if s_bid <= 0 or s_ask <= 0:
             continue
+        short_mid = (s_bid + s_ask) / 2
 
         delta = bs_put_delta(S, K_short, T, RISK_FREE_RATE, iv_for_delta)
         if delta is None:
             continue
         abs_delta = abs(delta)
 
-        if not (0.23 <= abs_delta <= 0.38):
+        if not (0.22 <= abs_delta <= 0.40):
             continue
 
-        for width in [2, 3, 5]:
+        for width in [2, 3, 5, 10]:
             K_long    = K_short - width
             long_rows = puts[puts['strike'] == K_long]
             if long_rows.empty:
                 continue
 
-            long_ask = long_rows.iloc[0].get('ask', 0)
-            if long_ask <= 0:
+            l_bid = long_rows.iloc[0].get('bid', 0)
+            l_ask = long_rows.iloc[0].get('ask', 0)
+            if l_bid <= 0 or l_ask <= 0:
                 continue
+            long_mid = (l_bid + l_ask) / 2
 
-            credit = short_bid - long_ask  # realistic net credit
+            credit       = short_mid - long_mid
             if credit < 0.10:
                 continue
 
@@ -175,7 +172,7 @@ def run_screen():
     results = []
 
     print(f"Bull Put Spread Screener — {today.strftime('%Y-%m-%d')}")
-    print(f"Fills: short=BID, long=ASK | IV/HV min 1.2x | IVR min 50%\n")
+    print(f"Credits: MID price | IV/HV min 1.2x | IVR min 50% | C/W min 33%\n")
 
     for ticker in TICKERS:
         try:
@@ -192,7 +189,6 @@ def run_screen():
             if hv is None or ivr is None or ivr < 50:
                 continue
 
-            # Find 30-45 DTE expiry
             exps = t.options
             if not exps:
                 continue
@@ -206,13 +202,12 @@ def run_screen():
             if not target_exp:
                 continue
 
-            T = target_dte / 365
+            T     = target_dte / 365
             chain = t.option_chain(target_exp)
             puts  = chain.puts
             if puts.empty:
                 continue
 
-            # Get ATM implied vol
             atm_iv = get_atm_iv(puts, S, T, RISK_FREE_RATE)
 
             if atm_iv and atm_iv > 0:
@@ -222,11 +217,11 @@ def run_screen():
             else:
                 iv_for_delta = hv
                 iv_pct       = round(hv * 100, 1)
-                iv_hv_ratio  = 1.0
+                iv_hv_ratio  = round(1.0, 2)
 
-            # IV/HV filter — must be at least 1.2x
+            # IV/HV filter
             if iv_hv_ratio < 1.2:
-                print(f"  [{ticker}] Skip — IV/HV {iv_hv_ratio}x < 1.2x")
+                print(f"  [{ticker}] Skip — IV/HV {iv_hv_ratio}x")
                 continue
 
             spread = find_best_spread(S, iv_for_delta, T, puts)
@@ -243,7 +238,7 @@ def run_screen():
                     'expiry':      target_exp,
                     **spread,
                 })
-                print(f"  [{ticker}] PASS — ${spread['short_strike']}/${spread['long_strike']} "
+                print(f"  [{ticker}] ✓ ${spread['short_strike']}/${spread['long_strike']} "
                       f"Credit:${spread['credit']} C/W:{spread['credit_ratio']}% "
                       f"IV/HV:{iv_hv_ratio}x Buffer:{spread['buffer']}%")
             else:
@@ -255,7 +250,6 @@ def run_screen():
             print(f"  [{ticker}] Error: {e}")
             continue
 
-    # Sort: IV/HV ratio first, then IVR
     results.sort(key=lambda x: (-x['iv_hv_ratio'], -x['ivr']))
     print(f"\nDone. {len(results)} opportunities found.")
     return results
@@ -264,39 +258,41 @@ def run_screen():
 # ── EMAIL ─────────────────────────────────────────────────────────
 
 def build_email(results, date_str):
-    th = 'style="padding:8px 12px;font-size:9px;color:#7a7870;text-transform:uppercase;letter-spacing:.08em;font-weight:400;white-space:nowrap;border-bottom:1px solid #1e232b;text-align:right;"'
+    th   = 'style="padding:8px 12px;font-size:9px;color:#7a7870;text-transform:uppercase;letter-spacing:.08em;font-weight:400;white-space:nowrap;border-bottom:1px solid #1e232b;text-align:right;"'
     th_l = 'style="padding:8px 12px;font-size:9px;color:#7a7870;text-transform:uppercase;letter-spacing:.08em;font-weight:400;white-space:nowrap;border-bottom:1px solid #1e232b;text-align:left;"'
+    th_c = 'style="padding:8px 12px;font-size:9px;color:#7a7870;text-transform:uppercase;letter-spacing:.08em;font-weight:400;white-space:nowrap;border-bottom:1px solid #1e232b;text-align:center;"'
 
     rows = ""
     for i, r in enumerate(results[:15], 1):
-        bg = "#111418" if i % 2 == 1 else "#0f1317"
-        ratio = r['iv_hv_ratio']
+        bg          = "#111418" if i % 2 == 1 else "#0f1317"
+        ratio       = r['iv_hv_ratio']
         ratio_color = "#f0a500" if ratio >= 1.5 else "#3dba6e" if ratio >= 1.3 else "#7a7870"
         ivr_color   = "#f0a500" if r['ivr'] >= 80 else "#3dba6e" if r['ivr'] >= 65 else "#5b9cf6"
-        cw_color    = "#3dba6e" if r['credit_ratio'] >= 40 else "#e8e6e0"
+        cw_color    = "#3dba6e" if r['credit_ratio'] >= 45 else "#e8e6e0"
 
-        td  = 'style="padding:9px 12px;font-family:monospace;font-size:12px;color:#e8e6e0;text-align:right;white-space:nowrap;"'
-        td_l= 'style="padding:9px 12px;font-family:monospace;font-size:12px;font-weight:600;color:#e8e6e0;text-align:left;white-space:nowrap;"'
+        td   = f'style="padding:9px 12px;font-family:monospace;font-size:12px;color:#e8e6e0;text-align:right;white-space:nowrap;background:{bg};"'
+        td_l = f'style="padding:9px 12px;font-family:monospace;font-size:12px;font-weight:600;color:#e8e6e0;text-align:left;white-space:nowrap;background:{bg};"'
+        td_c = f'style="padding:9px 12px;font-family:monospace;font-size:12px;color:#e8e6e0;text-align:center;white-space:nowrap;background:{bg};"'
 
-        rows += f"""<tr style="background:{bg};">
+        rows += f"""<tr>
           <td {td_l}>{i}. {r['ticker']}</td>
           <td {td}>${r['price']}</td>
-          <td style="padding:9px 12px;font-family:monospace;font-size:12px;color:{ivr_color};text-align:right;">{r['ivr']}%</td>
+          <td style="padding:9px 12px;font-family:monospace;font-size:12px;color:{ivr_color};text-align:right;background:{bg};">{r['ivr']}%</td>
           <td {td}>{r['iv_pct']}%</td>
           <td {td}>{r['hv_pct']}%</td>
-          <td style="padding:9px 12px;font-family:monospace;font-size:12px;color:{ratio_color};text-align:right;font-weight:600;">{ratio}x</td>
-          <td style="padding:9px 12px;font-family:monospace;font-size:12px;color:#e8e6e0;text-align:center;">${r['short_strike']}/${r['long_strike']}</td>
-          <td style="padding:9px 12px;font-family:monospace;font-size:12px;color:#7a7870;text-align:center;">{r['delta']}</td>
-          <td style="padding:9px 12px;font-family:monospace;font-size:12px;color:#3dba6e;text-align:right;font-weight:600;">${r['credit']}</td>
-          <td style="padding:9px 12px;font-family:monospace;font-size:12px;color:{cw_color};text-align:right;">{r['credit_ratio']}%</td>
+          <td style="padding:9px 12px;font-family:monospace;font-size:12px;color:{ratio_color};text-align:right;font-weight:600;background:{bg};">{ratio}x</td>
+          <td {td_c}>${r['short_strike']}/${r['long_strike']}</td>
+          <td {td_c}>{r['delta']}</td>
+          <td style="padding:9px 12px;font-family:monospace;font-size:12px;color:#3dba6e;text-align:right;font-weight:600;background:{bg};">${r['credit']}</td>
+          <td style="padding:9px 12px;font-family:monospace;font-size:12px;color:{cw_color};text-align:right;background:{bg};">{r['credit_ratio']}%</td>
           <td {td}>${r['breakeven']}</td>
           <td {td}>{r['buffer']}%</td>
-          <td style="padding:9px 12px;font-family:monospace;font-size:12px;color:#3dba6e;text-align:right;">${r['max_profit']}</td>
-          <td style="padding:9px 12px;font-family:monospace;font-size:12px;color:#e05252;text-align:right;">-${r['max_loss']}</td>
-          <td style="padding:9px 12px;font-family:monospace;font-size:12px;color:#7a7870;text-align:center;">{r['dte']}d · {r['expiry']}</td>
+          <td style="padding:9px 12px;font-family:monospace;font-size:12px;color:#3dba6e;text-align:right;background:{bg};">${r['max_profit']}</td>
+          <td style="padding:9px 12px;font-family:monospace;font-size:12px;color:#e05252;text-align:right;background:{bg};">-${r['max_loss']}</td>
+          <td {td_c}>{r['dte']}d · {r['expiry']}</td>
         </tr>"""
 
-    empty = "" if results else '<tr><td colspan="15" style="padding:40px;text-align:center;color:#7a7870;">No opportunities met all criteria today.</td></tr>'
+    empty = "" if results else '<tr><td colspan="15" style="padding:40px;text-align:center;color:#7a7870;font-size:13px;">No opportunities met all criteria today.</td></tr>'
 
     return f"""<!DOCTYPE html><html>
 <body style="background:#0a0c0f;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;padding:20px;margin:0;">
@@ -305,12 +301,17 @@ def build_email(results, date_str):
   <div style="border-bottom:1px solid #1e232b;padding-bottom:12px;margin-bottom:14px;">
     <div style="font-family:monospace;font-size:15px;font-weight:500;color:#f0a500;letter-spacing:.06em;">BULL PUT SPREAD SCREENER</div>
     <div style="font-size:10px;color:#7a7870;letter-spacing:.1em;text-transform:uppercase;margin-top:2px;">
-      {date_str} &nbsp;·&nbsp; {len(results)} opportunit{'ies' if len(results)!=1 else 'y'} &nbsp;·&nbsp; Fills: BID/ASK &nbsp;·&nbsp; IV/HV min 1.2x
+      {date_str} &nbsp;·&nbsp; {len(results)} opportunit{'ies' if len(results)!=1 else 'y'} &nbsp;·&nbsp; Sorted by IV/HV edge
     </div>
   </div>
 
+  <div style="background:#111418;border:1px solid #1e232b;border-radius:3px;padding:10px 14px;margin-bottom:16px;font-size:11px;color:#7a7870;font-family:monospace;line-height:1.8;">
+    Criteria: IVR &gt;50% &nbsp;|&nbsp; IV/HV &gt;1.2x &nbsp;|&nbsp; Delta 0.22–0.40 &nbsp;|&nbsp; C/W &gt;33% &nbsp;|&nbsp; Buffer &gt;5% &nbsp;|&nbsp; DTE 30–45<br>
+    Credits shown at MID price — expect actual fills 10–15% below mid on liquid names
+  </div>
+
   <div style="overflow-x:auto;">
-  <table style="width:100%;border-collapse:collapse;">
+  <table style="width:100%;border-collapse:collapse;font-size:12px;">
     <thead style="background:#0a0c0f;">
       <tr>
         <th {th_l}>Ticker</th>
@@ -318,16 +319,16 @@ def build_email(results, date_str):
         <th {th}>IVR</th>
         <th {th}>IV</th>
         <th {th}>HV30</th>
-        <th {th}>IV/HV</th>
-        <th style="padding:8px 12px;font-size:9px;color:#7a7870;text-transform:uppercase;letter-spacing:.08em;font-weight:400;border-bottom:1px solid #1e232b;text-align:center;">Strikes</th>
-        <th style="padding:8px 12px;font-size:9px;color:#7a7870;text-transform:uppercase;letter-spacing:.08em;font-weight:400;border-bottom:1px solid #1e232b;text-align:center;">Delta</th>
-        <th {th}>Credit</th>
+        <th {th}>IV/HV ↓</th>
+        <th {th_c}>Strikes</th>
+        <th {th_c}>Delta</th>
+        <th {th}>Credit*</th>
         <th {th}>C/W%</th>
         <th {th}>Breakeven</th>
         <th {th}>Buffer%</th>
-        <th {th}>Max Profit</th>
+        <th {th}>Max Profit*</th>
         <th {th}>Max Loss</th>
-        <th style="padding:8px 12px;font-size:9px;color:#7a7870;text-transform:uppercase;letter-spacing:.08em;font-weight:400;border-bottom:1px solid #1e232b;text-align:center;">Expiry</th>
+        <th {th_c}>Expiry</th>
       </tr>
     </thead>
     <tbody>{rows}{empty}</tbody>
@@ -335,21 +336,13 @@ def build_email(results, date_str):
   </div>
 
   <div style="margin-top:14px;font-size:10px;color:#4a4840;line-height:1.8;">
-    <strong style="color:#7a7870;">Column guide:</strong>
-    IVR = IV rank vs 52wk range &nbsp;|&nbsp;
-    IV = implied vol from ATM put &nbsp;|&nbsp;
-    HV30 = 30-day realized vol &nbsp;|&nbsp;
-    IV/HV = edge ratio — how much options are overpriced vs actual movement &nbsp;|&nbsp;
-    C/W% = credit as % of spread width &nbsp;|&nbsp;
-    Buffer% = drop needed to hit breakeven<br>
-    <span style="color:#f0a500;">Orange IV/HV</span> = strong edge (&gt;1.5x) &nbsp;·&nbsp;
-    <span style="color:#3dba6e;">Green IV/HV</span> = good edge (1.3–1.5x)<br><br>
-    Credits use BID for short put and ASK for long put — realistic execution prices.
-    Always verify with your broker. Not financial advice.
+    * Credit and Max Profit shown at mid price. Actual fills on Robinhood/broker typically 10–15% lower.<br>
+    <strong style="color:#7a7870;">IV/HV</strong> = implied vol ÷ 30-day realized vol. Higher = options more overpriced vs actual movement = stronger selling edge.<br>
+    <span style="color:#f0a500;">Orange</span> = strong edge (&gt;1.5x) &nbsp;·&nbsp; <span style="color:#3dba6e;">Green</span> = good edge (1.3–1.5x)<br>
+    Always verify strikes and credits with your broker before trading. Not financial advice.
   </div>
 
-</div>
-</body></html>"""
+</div></body></html>"""
 
 
 def send_email(results):
