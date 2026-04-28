@@ -256,6 +256,10 @@ def run_screen():
                 continue
 
             iv_hv = iv / hv
+            print(f"[{ticker}] IVR: {ivr:.1f}, IV: {iv_pct:.1f}%, HV: {hv_pct:.1f}%, IV/HV: {iv_hv:.2f}, Days to Earnings: {days_to_earnings}, Delta: {delta:.2f}, Buffer: {buffer:.1f}%")
+
+if iv_hv < 1.4:
+    continue  # Skip if IV/HV is too low
 
             if iv_hv < 1.4:
                 continue
