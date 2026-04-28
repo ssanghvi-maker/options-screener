@@ -1,51 +1,47 @@
 """
-bull_put_screener.py — CLEAN VERSION
+bull_put_screener.py
 
-Includes:
-- S&P 500 universe (CSV source)
-- IV/HV >= 1.4
-- Delta 0.18–0.28
-- Buffer >= 7%
-- Earnings filter (skip next 10 days only)
+Approach:
+- Uses MID price for credits (bid+ask)/2 — what brokers display
+- Adds IV/HV ratio check — only trades where IV > 1.2x realized vol (real edge)
+- Note in email: actual fills ~10-15% below mid on liquid names
+- Table format email
+- Sorted by IV/HV ratio descending
 """
 
 import yfinance as yf
 import numpy as np
-import pandas as pd
 from scipy.stats import norm
 from scipy.optimize import brentq
 from datetime import datetime
-import time
-import warnings
-
-
-warnings.filterwarnings('ignore')
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
 import smtplib
 import os
+import time
+import warnings
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+
+warnings.filterwarnings('ignore')
 
 GMAIL_USER         = os.environ.get("GMAIL_USER", "")
 GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "")
 EMAIL_RECIPIENT    = os.environ.get("EMAIL_RECIPIENT", "")
-RISK_FREE_RATE = 0.05
+RISK_FREE_RATE     = 0.05
+
+TICKERS = [
+    'NVDA','AMD','INTC','MU','QCOM','AVGO','ARM','SMCI','TSM',
+    'AAPL','MSFT','GOOGL','META','AMZN','NFLX','CRM','ORCL',
+    'TSLA','COIN','MSTR','PLTR','RBLX','HOOD','SOFI','RIVN',
+    'SPY','QQQ','IWM',
+    'UBER','ABNB','SNAP','PINS','LYFT',
+    'BA','CAT','GE','HON','LMT','RTX',
+    'JPM','GS','MS','BAC','C',
+    'XOM','CVX','OXY','SLB',
+    'AMGN','GILD','MRNA','PFE',
+]
 
 
-# ─────────────────────────────
-# S&P 500 TICKERS
-# ─────────────────────────────
-
-def get_sp500_tickers():
-    url = "https://datahub.io/core/s-and-p-500-companies/r/constituents.csv"
-    df = pd.read_csv(url)
-    return [t.replace(".", "-") for t in df["Symbol"].tolist()]
-
-TICKERS = get_sp500_tickers()
-
-
-# ─────────────────────────────
-# BLACK-SCHOLES
-# ─────────────────────────────
+# ── BLACK-SCHOLES ─────────────────────────────────────────────────
 
 def bs_put_price(S, K, T, r, sigma):
     if T <= 0 or sigma <= 0:
@@ -56,162 +52,138 @@ def bs_put_price(S, K, T, r, sigma):
 
 
 def bs_put_delta(S, K, T, r, sigma):
-    if T <= 0 or sigma <= 0:
-        return None
-    d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
-    return norm.cdf(d1) - 1
-
-
-def implied_vol(price, S, K, T, r):
-    if T <= 0 or price <= 0:
+    if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
         return None
     try:
-        def f(sig):
-            return bs_put_price(S, K, T, r, sig) - price
-        return brentq(f, 0.01, 5.0, maxiter=100)
+        d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
+        return norm.cdf(d1) - 1
     except:
         return None
 
 
-# ─────────────────────────────
-# VOLATILITY
-# ─────────────────────────────
-
-def get_hv_and_ivr(ticker):
+def implied_vol(market_price, S, K, T, r):
+    if T <= 0 or market_price <= 0:
+        return None
     try:
-        hist = ticker.history(period='1y')
-        returns = hist['Close'].pct_change().dropna()
+        if market_price <= max(K - S, 0) + 0.01:
+            return None
+        def f(sigma):
+            return bs_put_price(S, K, T, r, sigma) - market_price
+        return brentq(f, 0.01, 5.0, xtol=1e-5, maxiter=100)
+    except:
+        return None
 
-        hv = returns.tail(30).std() * np.sqrt(252)
 
-        rolling = returns.rolling(30).std().dropna() * np.sqrt(252)
-        hv_max, hv_min = rolling.max(), rolling.min()
+# ── VOLATILITY ────────────────────────────────────────────────────
 
-        if hv_max == hv_min:
+def get_hv_and_ivr(ticker_obj, window=30):
+    try:
+        hist = ticker_obj.history(period='1y')
+        if len(hist) < window + 10:
             return None, None
-
-        ivr = (hv - hv_min) / (hv_max - hv_min) * 100
-        return hv, ivr
+        returns = hist['Close'].pct_change().dropna()
+        hv_current = returns.tail(window).std() * np.sqrt(252)
+        rolling_hv = returns.rolling(window).std().dropna() * np.sqrt(252)
+        hv_max = rolling_hv.max()
+        hv_min = rolling_hv.min()
+        if hv_max == hv_min:
+            return hv_current, None
+        ivr = (hv_current - hv_min) / (hv_max - hv_min) * 100
+        return hv_current, round(ivr, 1)
     except:
         return None, None
 
 
-def get_atm_iv(puts, S, T):
+def get_atm_iv(puts, S, T, r):
     try:
-        puts = puts.copy()
-        puts["dist"] = abs(puts["strike"] - S)
-        atm = puts.nsmallest(1, "dist").iloc[0]
-
-        bid, ask = atm["bid"], atm["ask"]
+        p = puts.copy()
+        p['dist'] = abs(p['strike'] - S)
+        atm = p.nsmallest(1, 'dist').iloc[0]
+        bid = atm.get('bid', 0)
+        ask = atm.get('ask', 0)
         if bid <= 0 or ask <= 0:
             return None
-
         mid = (bid + ask) / 2
-        return implied_vol(mid, S, atm["strike"], T, RISK_FREE_RATE)
+        return implied_vol(mid, S, atm['strike'], T, r)
     except:
         return None
 
 
-# ─────────────────────────────
-# EARNINGS
-# ─────────────────────────────
+# ── SPREAD FINDER ─────────────────────────────────────────────────
 
-def get_next_earnings_date(t):
-    try:
-        cal = t.calendar
-
-        if isinstance(cal, pd.DataFrame) and "Earnings Date" in cal.index:
-            val = cal.loc["Earnings Date"].values[0]
-            return pd.to_datetime(val)
-
-        if isinstance(cal, dict):
-            ed = cal.get("Earnings Date")
-            if ed:
-                return pd.to_datetime(ed[0] if isinstance(ed, (list, tuple)) else ed)
-
-    except:
-        pass
-
-    return None
-
-
-# ─────────────────────────────
-# SPREAD FINDER
-# ─────────────────────────────
-
-def find_spread(S, iv, T, puts):
-
+def find_best_spread(S, iv_for_delta, T, puts):
+    """Find best spread using MID price for credits."""
     for _, put in puts.iterrows():
-        K_short = put["strike"]
-        bid, ask = put["bid"], put["ask"]
-
-        if bid <= 0 or ask <= 0:
+        K_short  = put['strike']
+        s_bid    = put.get('bid', 0)
+        s_ask    = put.get('ask', 0)
+        if s_bid <= 0 or s_ask <= 0:
             continue
+        short_mid = (s_bid + s_ask) / 2
 
-        short_mid = (bid + ask) / 2
-
-        delta = bs_put_delta(S, K_short, T, RISK_FREE_RATE, iv)
+        delta = bs_put_delta(S, K_short, T, RISK_FREE_RATE, iv_for_delta)
         if delta is None:
             continue
+        abs_delta = abs(delta)
 
-        if not (0.18 <= abs(delta) <= 0.28):
+        if not (0.22 <= abs_delta <= 0.40):
             continue
 
         for width in [2, 3, 5, 10]:
-            K_long = K_short - width
-            row = puts[puts["strike"] == K_long]
-
-            if row.empty:
+            K_long    = K_short - width
+            long_rows = puts[puts['strike'] == K_long]
+            if long_rows.empty:
                 continue
 
-            lb, la = row.iloc[0]["bid"], row.iloc[0]["ask"]
-            if lb <= 0 or la <= 0:
+            l_bid = long_rows.iloc[0].get('bid', 0)
+            l_ask = long_rows.iloc[0].get('ask', 0)
+            if l_bid <= 0 or l_ask <= 0:
                 continue
+            long_mid = (l_bid + l_ask) / 2
 
-            credit = short_mid - (lb + la) / 2
+            credit       = short_mid - long_mid
             if credit < 0.10:
                 continue
 
-            breakeven = K_short - credit
-            buffer = (S - breakeven) / S * 100
-            cw = credit / width
+            credit_ratio = credit / width
+            breakeven    = K_short - credit
+            buffer_pct   = (S - breakeven) / S * 100
 
-            if cw >= 0.33 and buffer >= 7:
+            if credit_ratio >= 0.33 and buffer_pct >= 5:
                 return {
-                    "short": K_short,
-                    "long": K_long,
-                    "delta": round(abs(delta), 2),
-                    "credit": round(credit, 2),
-                    "cw": round(cw * 100, 1),
-                    "buffer": round(buffer, 1),
+                    'short_strike': K_short,
+                    'long_strike':  K_long,
+                    'width':        width,
+                    'delta':        round(abs_delta, 2),
+                    'credit':       round(credit, 2),
+                    'credit_ratio': round(credit_ratio * 100, 1),
+                    'breakeven':    round(breakeven, 2),
+                    'buffer':       round(buffer_pct, 1),
+                    'max_profit':   int(credit * 100),
+                    'max_loss':     int((width - credit) * 100),
                 }
-
     return None
 
 
-# ─────────────────────────────
-# MAIN
-# ─────────────────────────────
+# ── MAIN SCREEN ───────────────────────────────────────────────────
 
 def run_screen():
-
-    today = datetime.today()
-    today_date = today.date()
-
+    today   = datetime.today()
     results = []
 
-    print(f"Screener running — {today}")
+    print(f"Bull Put Spread Screener — {today.strftime('%Y-%m-%d')}")
+    print(f"Credits: MID price | IV/HV min 1.2x | IVR min 50% | C/W min 33%\n")
 
     for ticker in TICKERS:
-
         try:
             t = yf.Ticker(ticker)
 
-            hist = t.history(period="5d")
+            hist = t.history(period='5d')
             if hist.empty:
                 continue
-
-            S = hist["Close"].iloc[-1]
+            S = hist['Close'].iloc[-1]
+            if S <= 0:
+                continue
 
             hv, ivr = get_hv_and_ivr(t)
             if hv is None or ivr is None or ivr < 50:
@@ -220,78 +192,68 @@ def run_screen():
             exps = t.options
             if not exps:
                 continue
-
-            target = None
-            dte = None
-
-            for e in exps:
-                d = (datetime.strptime(e, "%Y-%m-%d") - today).days
-                if 28 <= d <= 50:
-                    target = e
-                    dte = d
+            target_exp = target_dte = None
+            for exp in exps:
+                dte = (datetime.strptime(exp, '%Y-%m-%d') - today).days
+                if 28 <= dte <= 50:
+                    target_exp = exp
+                    target_dte = dte
                     break
-
-            if not target:
+            if not target_exp:
                 continue
 
-            # ✅ EARNINGS FILTER (10 DAYS ONLY)
-            earnings_date = get_next_earnings_date(t)
-
-            if earnings_date is not None:
-                ed = earnings_date.date()
-                days = (ed - today_date).days
-
-                if 0 <= days <= 10:
-                    continue
-
-            chain = t.option_chain(target)
-            puts = chain.puts
+            T     = target_dte / 365
+            chain = t.option_chain(target_exp)
+            puts  = chain.puts
             if puts.empty:
                 continue
 
-            T = dte / 365
+            atm_iv = get_atm_iv(puts, S, T, RISK_FREE_RATE)
 
-            iv = get_atm_iv(puts, S, T)
-            if not iv:
+            if atm_iv and atm_iv > 0:
+                iv_for_delta = atm_iv
+                iv_pct       = round(atm_iv * 100, 1)
+                iv_hv_ratio  = round(atm_iv / hv, 2)
+            else:
+                iv_for_delta = hv
+                iv_pct       = round(hv * 100, 1)
+                iv_hv_ratio  = round(1.0, 2)
+
+            # IV/HV filter
+            if iv_hv_ratio < 1.2:
+                print(f"  [{ticker}] Skip — IV/HV {iv_hv_ratio}x")
                 continue
 
-            iv_hv = iv / hv
-            print(f"[{ticker}] IVR: {ivr:.1f}, IV: {iv_pct:.1f}%, HV: {hv_pct:.1f}%, IV/HV: {iv_hv:.2f}, Days to Earnings: {days_to_earnings}, Delta: {delta:.2f}, Buffer: {buffer:.1f}%")
-
-            if iv_hv < 1.4:
-            continue  # Skip if IV/HV is too low
-
-            if iv_hv < 1.4:
-                continue
-
-            spread = find_spread(S, iv, T, puts)
+            spread = find_best_spread(S, iv_for_delta, T, puts)
 
             if spread:
                 results.append({
-                    "ticker": ticker,
-                    "price": round(S, 2),
-                    "ivr": round(ivr, 1),
-                    "iv_hv": round(iv_hv, 2),
-                    **spread
+                    'ticker':      ticker,
+                    'price':       round(S, 2),
+                    'ivr':         ivr,
+                    'iv_pct':      iv_pct,
+                    'hv_pct':      round(hv * 100, 1),
+                    'iv_hv_ratio': iv_hv_ratio,
+                    'dte':         target_dte,
+                    'expiry':      target_exp,
+                    **spread,
                 })
+                print(f"  [{ticker}] ✓ ${spread['short_strike']}/${spread['long_strike']} "
+                      f"Credit:${spread['credit']} C/W:{spread['credit_ratio']}% "
+                      f"IV/HV:{iv_hv_ratio}x Buffer:{spread['buffer']}%")
+            else:
+                print(f"  [{ticker}] No qualifying spread")
 
-            time.sleep(0.1)
+            time.sleep(0.3)
 
-        except:
+        except Exception as e:
+            print(f"  [{ticker}] Error: {e}")
             continue
 
-    results.sort(key=lambda x: -x["iv_hv"])
-
-    print(f"\nDone — {len(results)} trades found")
-
-    for r in results[:10]:
-        print(r)
-
+    results.sort(key=lambda x: (-x['iv_hv_ratio'], -x['ivr']))
+    print(f"\nDone. {len(results)} opportunities found.")
     return results
 
-
-if __name__ == "__main__":
-    run_screen()
 
 # ── EMAIL ─────────────────────────────────────────────────────────
 
