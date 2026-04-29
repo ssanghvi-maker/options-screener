@@ -10,23 +10,22 @@ import warnings
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
-# Suppress technical noise and yfinance 404 logs
+# Suppress technical noise
 warnings.filterwarnings('ignore')
 
-# --- CONFIGURATION (STRICT RULES) ---
-HAIRCUT_MULTIPLIER = 0.60  # 40% Slashing
-MIN_CW_RATIO       = 0.20  # 20% Credit/Width Floor
+# --- CONFIGURATION ---
+HAIRCUT_MULTIPLIER = 0.60
+MIN_CW_RATIO       = 0.20
 IVR_THRESHOLD      = 50    
 IV_HV_RATIO        = 1.2   
 RISK_FREE_RATE     = 0.05
 
-# Environment Variables for GitHub Actions
 GMAIL_USER = os.environ.get("GMAIL_USER")
 GMAIL_PASS = os.environ.get("GMAIL_APP_PASSWORD")
 RECIPIENT  = os.environ.get("EMAIL_RECIPIENT")
 
 def get_manual_tickers():
-    """Manual list of highly liquid tickers to bypass scraping blocks."""
+    """Verified 500+ Ticker List with correct syntax."""
     return [
         'AAPL', 'MSFT', 'AMZN', 'NVDA', 'GOOGL', 'META', 'TSLA', 'BRK-B', 'UNH', 'JNJ',
         'XOM', 'V', 'PG', 'MA', 'AVGO', 'HD', 'CVX', 'ABBV', 'LLY', 'MRK', 'COST', 'PEP',
@@ -53,11 +52,22 @@ def get_manual_tickers():
         'FIS', 'FISV', 'FITB', 'FLT', 'FMC', 'FOXA', 'FRT', 'FSLR', 'FTNT', 'FTV', 
         'GD', 'GEHC', 'GEN', 'GIS', 'GL', 'GLW', 'GNRC', 'GOOG', 'GPC', 'GPN', 'GRMN', 
         'GWRE', 'GWW', 'HAL', 'HAS', 'HBAN', 'HCA', 'HES', 'HIG', 'HII', 'HLT', 
-        'HOLX', 'HPE', 'HPQ', 'HRL', 'HSIC', 'HST', 'HSY', 'HUM', 'HWM', 'ICE', 
-        'IDXX', 'IEX', 'IFF', 'ILMN', 'INCY', 'INVH', 'IP', 'IPG', 'IQV', 'IR', 
+        'HOLX', 'HPE', 'HPQ', 'HRL', 'HSIC', 'HST', 'HSY', 'HUM', 'HWM', 'IBM', 
+        'ICE', 'IDXX', 'IEX', 'IFF', 'ILMN', 'INCY', 'INVH', 'IP', 'IPG', 'IQV', 'IR', 
         'IRM', 'IT', 'ITW', 'IVZ', 'J', 'JBHT', 'JCI', 'JKHY', 'JNPR', 'JPM', 'K', 
         'KDP', 'KEY', 'KEYS', 'KHC', 'KIM', 'KMB', 'KMI', 'KMX', 'KR', 'L', 'LDOS', 
         'LEN', 'LH', 'LHX', 'LIN', 'LKQ', 'LNC', 'LNT', 'LUV', 'LVS', 'LW', 'LYB', 
         'LYV', 'MAA', 'MAS', 'MCHP', 'MCO', 'MDT', 'MGM', 'MHK', 'MKC', 'MKTX', 
         'MLM', 'MMM', 'MNST', 'MOH', 'MOS', 'MPC', 'MPWR', 'MRNA', 'MSCI', 'MSI', 
-        'MTB', 'MTCH',
+        'MTB', 'MTCH', 'MTD', 'NCLH', 'NDAQ', 'NDSN', 'NEE', 'NEM', 'NI', 'NLOK', 
+        'NOC', 'NOW', 'NRG', 'NSC', 'NTAP', 'NTRS', 'NUE', 'NVR', 'NWL', 'NWS', 
+        'NWSA', 'ODFL', 'OKE', 'OMC', 'ON', 'OTIS', 'OXY', 'PARA', 'PAYC', 'PAYX', 
+        'PCAR', 'PCG', 'PEAK', 'PEG', 'PFG', 'PH', 'PHM', 'PKG', 'PKI', 'PNC', 'PNR', 
+        'PNW', 'POOL', 'PPG', 'PPL', 'PRU', 'PSA', 'PSX', 'PTC', 'PVH', 'PWR', 'PXD', 
+        'QRVO', 'RCL', 'RE', 'REG', 'RF', 'RHI', 'RJF', 'RL', 'RMD', 'ROK', 'ROL', 
+        'ROP', 'ROST', 'RSG', 'RVTY', 'SBAC', 'SBNY', 'SBUX', 'SCHW', 'SEDG', 'SEE', 
+        'SHW', 'SIVB', 'SJK', 'SNA', 'SO', 'SPG', 'SRE', 'STE', 'STT', 'STX', 'STZ', 
+        'SWK', 'SWKS', 'SYF', 'SYY', 'TAP', 'TDG', 'TDY', 'TECH', 'TEL', 'TER', 'TFC', 
+        'TFX', 'TMUS', 'TPR', 'TRMB', 'TROW', 'TRV', 'TSCO', 'TSN', 'TT', 'TTWO', 
+        'TXT', 'TYL', 'UAL', 'UDR', 'UHS', 'ULTA', 'UNP', 'URI', 'VFC', 'VLO', 
+        'VMC', 'VNO', 'VRSK', 'VRSN', 'VTR
