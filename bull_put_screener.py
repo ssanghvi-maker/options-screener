@@ -4,28 +4,41 @@ import numpy as np
 from scipy.stats import norm
 from scipy.optimize import brentq
 from datetime import datetime
-import requests
 import smtplib
-import os  # Fixed the NameError
+import os
 import warnings
-import time
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
-# Suppress noise
+# Suppress technical noise
 warnings.filterwarnings('ignore')
 
-# --- CONFIGURATION (STRICT DISCIPLINE) ---
+# --- CONFIGURATION (YOUR RULES) ---
 HAIRCUT_MULTIPLIER = 0.60  # 40% Slashing
 MIN_CW_RATIO       = 0.20  # 20% C/W floor AFTER haircut
 IVR_THRESHOLD      = 50    
 IV_HV_RATIO        = 1.2   
 RISK_FREE_RATE     = 0.05
 
-# GitHub Action / Environment Variables
+# GitHub Secrets / Env Vars
 GMAIL_USER = os.environ.get("GMAIL_USER")
 GMAIL_PASS = os.environ.get("GMAIL_APP_PASSWORD")
 RECIPIENT  = os.environ.get("EMAIL_RECIPIENT")
+
+# --- THE MANUALLY ADDED LIST (Expanded Fallback) ---
+def get_hardcoded_tickers():
+    return [
+        'AAPL', 'MSFT', 'AMZN', 'NVDA', 'GOOGL', 'META', 'TSLA', 'BRK-B', 'UNH', 'JNJ',
+        'XOM', 'V', 'PG', 'MA', 'AVGO', 'HD', 'CVX', 'ABBV', 'LLY', 'MRK',
+        'COST', 'PEP', 'TMO', 'WMT', 'KO', 'DIS', 'CSCO', 'ACN', 'ADBE', 'ORCL',
+        'AMD', 'NFLX', 'CRM', 'ABT', 'CMCSA', 'TXN', 'DHR', 'INTC', 'HON', 'QCOM',
+        'VZ', 'PM', 'NKE', 'LOW', 'RTX', 'UPS', 'T', 'COP', 'SPGI', 'IBM',
+        'CAT', 'AXP', 'LMT', 'AMAT', 'GE', 'BA', 'INTU', 'GS', 'PLD', 'C',
+        'ELV', 'DE', 'BKNG', 'MDLZ', 'SYK', 'ADI', 'GILD', 'ISRG', 'TJX', 'REGN',
+        'VRTX', 'LRCX', 'ZTS', 'MMC', 'SCHW', 'MU', 'PANW', 'SNPS', 'CDNS', 'ETN',
+        'SLB', 'CVS', 'CI', 'BSX', 'WM', 'BDX', 'TGT', 'KLAC', 'PGR', 'MCD',
+        'SPY', 'QQQ', 'IWM', 'SMH', 'XLF', 'XLK', 'XLE', 'XLV', 'XLY', 'XLI'
+    ]
 
 # --- MATH ENGINE ---
 def bs_put_price(S, K, T, r, sigma):
@@ -46,131 +59,88 @@ def implied_vol(market_price, S, K, T, r):
         return brentq(f, 0.001, 5.0, xtol=1e-4)
     except: return None
 
-# --- RESILIENT DATA FETCHING ---
-def get_sp500_tickers():
-    try:
-        url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        response = requests.get(url, headers=headers, timeout=15)
-        # Using lxml and specifically targeting the first table
-        df = pd.read_html(response.text, flavor='lxml')[0]
-        tickers = df['Symbol'].str.replace('.', '-', regex=False).tolist()
-        etfs = ['SPY', 'QQQ', 'IWM', 'DIA', 'SMH', 'XLF', 'XLE', 'XLK']
-        full_list = sorted(list(set(tickers + etfs)))
-        print(f"--- SUCCESS: Scanning {len(full_list)} Tickers ---")
-        return full_list
-    except Exception as e:
-        print(f"Fetch failed: {e}. Defaulting to fallback list.")
-        return ['AAPL', 'MSFT', 'AMZN', 'NVDA', 'GOOGL', 'META', 'TSLA', 'SPY', 'QQQ']
-
-def get_earnings_safe(ticker_obj):
-    try:
-        cal = ticker_obj.calendar
-        if cal is not None and not cal.empty:
-            e_date = cal.iloc[0, 0] if isinstance(cal, pd.DataFrame) else cal.get('Earnings Date', [None])[0]
-            if hasattr(e_date, 'date'): return e_date.date()
-    except: pass
-    return None
-
-def get_vol_data(ticker_obj):
-    try:
-        hist = ticker_obj.history(period='1y')
-        if len(hist) < 252: return None, None
-        returns = np.log(hist['Close'] / hist['Close'].shift(1)).dropna()
-        hv = returns.tail(30).std() * np.sqrt(252)
-        rolling_hv = returns.rolling(30).std().dropna() * np.sqrt(252)
-        ivr = ((hv - rolling_hv.min()) / (rolling_hv.max() - rolling_hv.min())) * 100
-        return hv, round(ivr, 1)
-    except: return None, None
-
-# --- SPREAD FINDER ---
-def find_spread(S, iv_est, T, puts):
-    for _, put in puts.iterrows():
-        K_short = put['strike']
-        if put['bid'] <= 0: continue
-        delta = bs_put_delta(S, K_short, T, RISK_FREE_RATE, iv_est)
-        if not (-0.40 <= delta <= -0.15): continue
-
-        for width in [2, 5, 10]:
-            K_long = K_short - width
-            l_row = puts[puts['strike'] == K_long]
-            if l_row.empty: continue
-            
-            mid_s = (put['bid'] + put['ask']) / 2
-            mid_l = (l_row.iloc[0]['bid'] + l_row.iloc[0]['ask']) / 2
-            raw_credit = mid_s - mid_l
-            final_credit = round(raw_credit * HAIRCUT_MULTIPLIER, 2)
-            
-            if (final_credit / width) >= MIN_CW_RATIO:
-                return {'Short': K_short, 'Long': K_long, 'Width': width, 'Credit': final_credit, 
-                        'CW_Pct': round((final_credit/width)*100,1), 'Delta': round(abs(delta),2)}
-    return None
-
-# --- MAIN RUNNER ---
+# --- SCANNING ENGINE ---
 def run_screen():
-    tickers = get_sp500_tickers()
+    tickers = get_hardcoded_tickers()
     today = datetime.today().date()
-    final_picks = []
+    final_results = []
 
-    for i, ticker in enumerate(tickers, 1):
+    print(f"--- STARTING HARDCODED SCAN: {len(tickers)} TICKERS ---")
+
+    for ticker in tickers:
         try:
-            # Triple-Lock Shield
-            if ticker in ['MSFT', 'AMZN', 'GOOGL', 'META', 'AAPL']: continue
-            
+            # Shield: MSFT/AMZN/GOOGL have earnings today (April 29, 2026)
+            if ticker in ['MSFT', 'AMZN', 'GOOGL', 'META']: continue
+
             t = yf.Ticker(ticker)
-            earn_date = get_earnings_safe(t)
-            if earn_date and -1 <= (earn_date - today).days <= 35: continue
+            
+            # Avoid the 404 by skipping t.calendar and t.info. 
+            # We calculate HV from historical prices only.
+            hist = t.history(period='1y')
+            if len(hist) < 252: continue
+            
+            returns = np.log(hist['Close'] / hist['Close'].shift(1)).dropna()
+            hv = returns.tail(30).std() * np.sqrt(252)
+            rolling_hv = returns.rolling(30).std().dropna() * np.sqrt(252)
+            ivr = ((hv - rolling_hv.min()) / (rolling_hv.max() - rolling_hv.min())) * 100
+            
+            if ivr < IVR_THRESHOLD: continue
 
-            hv, ivr = get_vol_data(t)
-            if ivr is None or ivr < IVR_THRESHOLD: continue
-
+            # Get Options Expiry
             exps = t.options
             target_exp = next((e for e in exps if 28 <= (datetime.strptime(e, '%Y-%m-%d').date() - today).days <= 50), None)
             if not target_exp: continue
 
             chain = t.option_chain(target_exp)
-            S = t.history(period='1d')['Close'].iloc[-1]
-            atm_put = chain.puts.iloc[(chain.puts['strike'] - S).abs().argsort()[:1]]
-            iv_est = implied_vol((atm_put['bid'].iloc[0]+atm_put['ask'].iloc[0])/2, S, atm_put['strike'].iloc[0], 40/365, RISK_FREE_RATE)
+            S = hist['Close'].iloc[-1]
+            puts = chain.puts
+            
+            # Estimate IV from ATM Put
+            atm_put = puts.iloc[(puts['strike'] - S).abs().argsort()[:1]]
+            mid_atm = (atm_put['bid'].iloc[0] + atm_put['ask'].iloc[0]) / 2
+            iv_est = implied_vol(mid_atm, S, atm_put['strike'].iloc[0], 40/365, RISK_FREE_RATE)
             
             if not iv_est or (iv_est / hv) < IV_HV_RATIO: continue
 
-            pick = find_spread(S, iv_est, 40/365, chain.puts)
-            if pick:
-                print(f"  [FOUND] {ticker}")
-                final_picks.append({'Ticker': ticker, 'Price': round(S,2), 'IVR': ivr, 'Expiry': target_exp, **pick})
-        except: continue
-        if i % 50 == 0: print(f"Progress: {i}/{len(tickers)} scanned...")
-    return final_picks
+            # Search Spreads
+            for _, put in puts.iterrows():
+                K_short = put['strike']
+                if put['bid'] <= 0 or K_short > S: continue
+                
+                delta = bs_put_delta(S, K_short, 40/365, RISK_FREE_RATE, iv_est)
+                if not (-0.40 <= delta <= -0.15): continue
 
-def send_html_email(data):
-    if not data or not GMAIL_USER:
-        print("No results or email credentials missing.")
-        return
+                for width in [2, 5, 10]:
+                    K_long = K_short - width
+                    l_row = puts[puts['strike'] == K_long]
+                    if l_row.empty: continue
+                    
+                    raw_credit = ((put['bid']+put['ask'])/2) - ((l_row.iloc[0]['bid']+l_row.iloc[0]['ask'])/2)
+                    final_credit = round(raw_credit * HAIRCUT_MULTIPLIER, 2)
+                    
+                    if (final_credit / width) >= MIN_CW_RATIO:
+                        print(f"  [FOUND] {ticker}")
+                        final_results.append({
+                            'Ticker': ticker, 'Price': round(S,2), 'IVR': round(ivr,1),
+                            'Short': K_short, 'Long': K_long, 'Credit': final_credit, 
+                            'CW_Pct': round((final_credit/width)*100,1), 'Delta': abs(round(delta,2))
+                        })
+                        break 
+        except: continue
+    return final_results
+
+def send_email(data):
+    if not data or not GMAIL_USER: return
     df = pd.DataFrame(data)
-    html_table = df.to_html(index=False, border=1, justify='center', classes='table')
-    
-    html_body = f"""
-    <html><head><style>
-        .table {{font-family: Arial; border-collapse: collapse; width: 100%;}}
-        .table td, .table th {{border: 1px solid #ddd; padding: 8px; text-align: center;}}
-        .table th {{background-color: #004d99; color: white;}}
-        .table tr:nth-child(even){{background-color: #f2f2f2;}}
-    </style></head>
-    <body><h2>Daily Option Screen Results</h2>{html_table}</body></html>
-    """
-    msg = MIMEMultipart()
-    msg['Subject'] = f"Option Report: {len(data)} Candidates Found"
-    msg.attach(MIMEText(html_body, 'html'))
-    
+    html = f"<html><body>{df.to_html(index=False)}</body></html>"
+    msg = MIMEMultipart(); msg['Subject'] = "Manual Trade Report"
+    msg.attach(MIMEText(html, 'html'))
     try:
-        with smtplib.SMTP('smtp.gmail.com', 587) as server:
-            server.starttls()
-            server.login(GMAIL_USER, GMAIL_PASS)
-            server.sendmail(GMAIL_USER, RECIPIENT, msg.as_string())
-            print("Email sent successfully.")
-    except Exception as e: print(f"Email failed: {e}")
+        with smtplib.SMTP('smtp.gmail.com', 587) as s:
+            s.starttls(); s.login(GMAIL_USER, GMAIL_PASS); s.send_message(msg)
+            print("Email Sent.")
+    except Exception as e: print(f"Email Failed: {e}")
 
 if __name__ == "__main__":
-    results = run_screen()
-    send_html_email(results)
+    found = run_screen()
+    send_email(found
