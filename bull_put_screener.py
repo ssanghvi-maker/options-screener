@@ -138,7 +138,7 @@ def run_screen():
             earn_date = get_earnings_date(t)
             if earn_date:
                 days_to = (earn_date - today).days
-                if 0 <= days_to <= 35:
+                if -1 <= days_to <= 35:
                     print(f"  [{ticker}] SKIP: Earnings in {days_to} days.")
                     continue
 
