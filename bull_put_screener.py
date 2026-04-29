@@ -10,6 +10,7 @@ Approach:
 """
 
 import yfinance as yf
+import pandas as pd
 import numpy as np
 from scipy.stats import norm
 from scipy.optimize import brentq
@@ -28,57 +29,25 @@ GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "")
 EMAIL_RECIPIENT    = os.environ.get("EMAIL_RECIPIENT", "")
 RISK_FREE_RATE     = 0.05
 
-TICKERS = [
-   'A','AAL','AAP','AAPL','ABBV','ABC','ABMD','ABT','ACGL','ACN',
-'ADBE','ADI','ADM','ADP','ADSK','AEE','AEP','AES','AFL','AIG',
-'AIZ','AJG','AKAM','ALB','ALGN','ALK','ALL','ALLE','AMAT','AMCR',
-'AMD','AME','AMGN','AMP','AMT','AMZN','ANET','ANSS','AON','AOS',
-'APA','APD','APH','APTV','ARE','ATO','ATVI','AVB','AVGO','AVY',
-'AWK','AXP','AZO','BA','BAC','BALL','BAX','BBWI','BBY','BDX',
-'BEN','BF.B','BIIB','BIO','BK','BKNG','BKR','BLK','BLL','BMY',
-'BR','BRK.B','BRO','BSX','BWA','BXP','C','CAG','CAH','CARR',
-'CAT','CB','CBOE','CBRE','CCI','CCL','CDNS','CDW','CE','CEG',
-'CF','CFG','CHD','CHRW','CHTR','CI','CINF','CL','CLX','CMA',
-'CMCSA','CME','CMG','CMI','CMS','CNC','CNP','COF','COO','COP',
-'COST','CPB','CPRT','CPT','CRL','CRM','CSCO','CSGP','CSX','CTAS',
-'CTLT','CTRA','CTSH','CTVA','CVS','CVX','CZR','D','DAL','DD',
-'DE','DFS','DG','DGX','DHI','DHR','DIS','DLR','DLTR','DOV',
-'DOW','DPZ','DRI','DTE','DUK','DVA','DVN','DXC','EA','EBAY',
-'ECL','ED','EFX','EIX','EL','EMN','EMR','ENPH','EOG','EPAM',
-'EQIX','EQR','EQT','ES','ESS','ETN','ETR','ETSY','EVRG','EW',
-'EXC','EXPD','EXPE','EXR','F','FANG','FAST','FCX','FDS','FDX',
-'FE','FFIV','FIS','FISV','FITB','FLT','FMC','FOX','FOXA','FRT',
-'FTNT','FTV','GD','GE','GEN','GILD','GIS','GL','GLW','GM',
-'GNRC','GOOG','GOOGL','GPC','GPN','GRMN','GS','GWW','HAL','HAS',
-'HBAN','HCA','HD','HES','HIG','HII','HLT','HOLX','HON','HPE',
-'HPQ','HRL','HSIC','HST','HSY','HUM','HWM','IBM','ICE','IDXX',
-'IEX','IFF','ILMN','INCY','INTC','INTU','INVH','IP','IPG','IQV',
-'IR','IRM','ISRG','IT','ITW','IVZ','J','JBHT','JCI','JKHY',
-'JNJ','JNPR','JPM','K','KDP','KEY','KEYS','KHC','KIM','KLAC',
-'KMB','KMI','KMX','KO','KR','L','LDOS','LEN','LH','LHX',
-'LIN','LKQ','LLY','LMT','LNC','LNT','LOW','LRCX','LUV','LVS',
-'LW','LYB','LYV','MA','MAA','MAR','MAS','MCD','MCHP','MCK',
-'MCO','MDLZ','MDT','MET','META','MGM','MHK','MKC','MKTX','MLM',
-'MMC','MMM','MNST','MO','MOS','MPC','MPWR','MRK','MRNA','MRO',
-'MS','MSCI','MSFT','MSI','MTB','MTCH','MTD','MU','NCLH','NDAQ',
-'NDSN','NEE','NEM','NFLX','NI','NKE','NOC','NOW','NRG','NSC',
-'NTAP','NTRS','NUE','NVDA','NVR','NWL','NWS','NWSA','NXPI','O',
-'ODFL','OKE','OMC','ON','ORCL','ORLY','OTIS','OXY','PAYC','PAYX',
-'PCAR','PCG','PEAK','PEG','PEP','PFE','PFG','PG','PGR','PH',
-'PHM','PKG','PLD','PM','PNC','PNR','PNW','PODD','POOL','PPG',
-'PPL','PRU','PSA','PSX','PTC','PWR','PXD','PYPL','QCOM','QRVO',
-'RCL','REG','REGN','RF','RHI','RJF','RL','RMD','ROK','ROL',
-'ROP','ROST','RSG','RTX','SBAC','SBUX','SCHW','SEDG','SEE','SHW',
-'SIVB','SJM','SLB','SNA','SNPS','SO','SPG','SPGI','SRE','STE',
-'STT','STX','STZ','SWK','SWKS','SYF','SYK','SYY','T','TAP',
-'TDG','TDY','TECH','TEL','TER','TFC','TFX','TGT','TJX','TMO',
-'TMUS','TPR','TRGP','TRMB','TROW','TRV','TSCO','TSLA','TSN','TT',
-'TTWO','TXN','TXT','TYL','UAL','UDR','UHS','ULTA','UNH','UNP',
-'UPS','URI','USB','V','VFC','VICI','VLO','VMC','VNO','VRSK',
-'VRSN','VRTX','VTR','VTRS','VZ','WAB','WAT','WBA','WBD','WDC',
-'WEC','WELL','WFC','WHR','WM','WMB','WMT','WRB','WRK','WST',
-'WTW','WY','WYNN','XEL','XOM','XRAY','XYL','YUM','ZBH','ZBRA','ZTS'
-]
+def get_sp500_tickers():
+    """Pull live S&P 500 tickers from Wikipedia."""
+    try:
+        import pandas as pd
+        tables = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies')
+        tickers = tables[0]['Symbol'].tolist()
+        # Clean tickers — replace dots with hyphens (BRK.B -> BRK-B)
+        tickers = [t.replace('.', '-') for t in tickers]
+        print(f"  Loaded {len(tickers)} S&P 500 tickers from Wikipedia")
+        return tickers
+    except Exception as e:
+        print(f"  Wikipedia fetch failed ({e}) — using fallback list")
+        return [
+            'NVDA','AMD','INTC','MU','QCOM','AVGO','ARM','TSLA','AAPL',
+            'MSFT','GOOGL','META','AMZN','NFLX','CRM','ORCL','COIN','PLTR',
+            'SPY','QQQ','IWM','UBER','ABNB','SNAP','BA','CAT','GE','HON',
+            'LMT','RTX','JPM','GS','MS','BAC','XOM','CVX','OXY','AMGN',
+            'GILD','MRNA','PFE','SMCI','MSTR','HOOD','SOFI','RBLX','RIVN',
+        ]
 
 
 # ── BLACK-SCHOLES ─────────────────────────────────────────────────
@@ -149,6 +118,34 @@ def get_atm_iv(puts, S, T, r):
         return None
 
 
+
+
+def get_earnings_info(ticker_obj):
+    """Get next earnings date and flag if within 30 days or just passed."""
+    try:
+        cal = ticker_obj.calendar
+        if cal is None or cal.empty:
+            return None, None
+        # calendar returns a df with dates as columns
+        dates = cal.columns.tolist() if hasattr(cal, 'columns') else []
+        if not dates:
+            return None, None
+        next_earnings = dates[0]
+        if hasattr(next_earnings, 'date'):
+            next_earnings = next_earnings.date()
+        today = datetime.today().date()
+        days_to_earnings = (next_earnings - today).days
+        if days_to_earnings < 0:
+            days_since = abs(days_to_earnings)
+            if days_since <= 14:
+                return next_earnings, f"JUST REPORTED ({days_since}d ago)"
+            return next_earnings, None
+        if days_to_earnings <= 30:
+            return next_earnings, f"EARNINGS IN {days_to_earnings}d — IV INFLATED"
+        return next_earnings, None
+    except:
+        return None, None
+
 # ── SPREAD FINDER ─────────────────────────────────────────────────
 
 def find_best_spread(S, iv_for_delta, T, puts):
@@ -181,15 +178,16 @@ def find_best_spread(S, iv_for_delta, T, puts):
                 continue
             long_mid = (l_bid + l_ask) / 2
 
-            credit       = short_mid - long_mid
-            if credit < 0.10:
+            credit_raw   = short_mid - long_mid
+            if credit_raw < 0.10:
                 continue
-
+            # Apply 25% reduction to reflect realistic fills vs mid price
+            credit       = round(credit_raw * 0.75, 2)
             credit_ratio = credit / width
             breakeven    = K_short - credit
             buffer_pct   = (S - breakeven) / S * 100
 
-            if credit_ratio >= 0.33 and buffer_pct >= 5:
+            if credit_ratio >= 0.25 and buffer_pct >= 5:
                 return {
                     'short_strike': K_short,
                     'long_strike':  K_long,
@@ -214,7 +212,9 @@ def run_screen():
     print(f"Bull Put Spread Screener — {today.strftime('%Y-%m-%d')}")
     print(f"Credits: MID price | IV/HV min 1.2x | IVR min 50% | C/W min 33%\n")
 
-    for ticker in TICKERS:
+    tickers = get_sp500_tickers()
+    print(f"Screening {len(tickers)} tickers...\n")
+    for ticker in tickers:
         try:
             t = yf.Ticker(ticker)
 
@@ -264,23 +264,30 @@ def run_screen():
                 print(f"  [{ticker}] Skip — IV/HV {iv_hv_ratio}x")
                 continue
 
+            # Check earnings
+            earnings_date, earnings_flag = get_earnings_info(t)
+            earnings_str = str(earnings_date) if earnings_date else '—'
+
             spread = find_best_spread(S, iv_for_delta, T, puts)
 
             if spread:
                 results.append({
-                    'ticker':      ticker,
-                    'price':       round(S, 2),
-                    'ivr':         ivr,
-                    'iv_pct':      iv_pct,
-                    'hv_pct':      round(hv * 100, 1),
-                    'iv_hv_ratio': iv_hv_ratio,
-                    'dte':         target_dte,
-                    'expiry':      target_exp,
+                    'ticker':        ticker,
+                    'price':         round(S, 2),
+                    'ivr':           ivr,
+                    'iv_pct':        iv_pct,
+                    'hv_pct':        round(hv * 100, 1),
+                    'iv_hv_ratio':   iv_hv_ratio,
+                    'dte':           target_dte,
+                    'expiry':        target_exp,
+                    'earnings_date': earnings_str,
+                    'earnings_flag': earnings_flag,
                     **spread,
                 })
+                flag_str = f" ⚠ {earnings_flag}" if earnings_flag else ""
                 print(f"  [{ticker}] ✓ ${spread['short_strike']}/${spread['long_strike']} "
                       f"Credit:${spread['credit']} C/W:{spread['credit_ratio']}% "
-                      f"IV/HV:{iv_hv_ratio}x Buffer:{spread['buffer']}%")
+                      f"IV/HV:{iv_hv_ratio}x Buffer:{spread['buffer']}%{flag_str}")
             else:
                 print(f"  [{ticker}] No qualifying spread")
 
@@ -314,6 +321,14 @@ def build_email(results, date_str):
         td_l = f'style="padding:9px 12px;font-family:monospace;font-size:12px;font-weight:600;color:#e8e6e0;text-align:left;white-space:nowrap;background:{bg};"'
         td_c = f'style="padding:9px 12px;font-family:monospace;font-size:12px;color:#e8e6e0;text-align:center;white-space:nowrap;background:{bg};"'
 
+        ef = r.get('earnings_flag')
+        ed = r.get('earnings_date','—')
+        if ef and 'EARNINGS IN' in ef:
+            earnings_cell = f'<span style="color:#e05252;">{ed}<br>{ef}</span>'
+        elif ef and 'JUST REPORTED' in ef:
+            earnings_cell = f'<span style="color:#3dba6e;">{ed}<br>{ef}</span>'
+        else:
+            earnings_cell = f'<span style="color:#7a7870;">{ed}</span>'
         rows += f"""<tr>
           <td {td_l}>{i}. {r['ticker']}</td>
           <td {td}>${r['price']}</td>
@@ -330,9 +345,10 @@ def build_email(results, date_str):
           <td style="padding:9px 12px;font-family:monospace;font-size:12px;color:#3dba6e;text-align:right;background:{bg};">${r['max_profit']}</td>
           <td style="padding:9px 12px;font-family:monospace;font-size:12px;color:#e05252;text-align:right;background:{bg};">-${r['max_loss']}</td>
           <td {td_c}>{r['dte']}d · {r['expiry']}</td>
+          <td style="padding:9px 12px;font-family:monospace;font-size:11px;text-align:center;white-space:nowrap;background:{bg};">{earnings_cell}</td>
         </tr>"""
 
-    empty = "" if results else '<tr><td colspan="15" style="padding:40px;text-align:center;color:#7a7870;font-size:13px;">No opportunities met all criteria today.</td></tr>'
+    empty = "" if results else '<tr><td colspan="16" style="padding:40px;text-align:center;color:#7a7870;font-size:13px;">No opportunities met all criteria today.</td></tr>'
 
     return f"""<!DOCTYPE html><html>
 <body style="background:#0a0c0f;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;padding:20px;margin:0;">
@@ -346,8 +362,8 @@ def build_email(results, date_str):
   </div>
 
   <div style="background:#111418;border:1px solid #1e232b;border-radius:3px;padding:10px 14px;margin-bottom:16px;font-size:11px;color:#7a7870;font-family:monospace;line-height:1.8;">
-    Criteria: IVR &gt;50% &nbsp;|&nbsp; IV/HV &gt;1.2x &nbsp;|&nbsp; Delta 0.22–0.40 &nbsp;|&nbsp; C/W &gt;33% &nbsp;|&nbsp; Buffer &gt;5% &nbsp;|&nbsp; DTE 30–45<br>
-    Credits shown at MID price — expect actual fills 10–15% below mid on liquid names
+    Criteria: IVR &gt;50% &nbsp;|&nbsp; IV/HV &gt;1.2x &nbsp;|&nbsp; Delta 0.22–0.40 &nbsp;|&nbsp; C/W &gt;25% &nbsp;|&nbsp; Buffer &gt;5% &nbsp;|&nbsp; DTE 30–45<br>
+    Credits shown at MID price minus 25% — conservative estimate of realistic fills
   </div>
 
   <div style="overflow-x:auto;">
@@ -369,6 +385,7 @@ def build_email(results, date_str):
         <th {th}>Max Profit*</th>
         <th {th}>Max Loss</th>
         <th {th_c}>Expiry</th>
+        <th {th_c}>Earnings</th>
       </tr>
     </thead>
     <tbody>{rows}{empty}</tbody>
@@ -376,7 +393,7 @@ def build_email(results, date_str):
   </div>
 
   <div style="margin-top:14px;font-size:10px;color:#4a4840;line-height:1.8;">
-    * Credit and Max Profit shown at mid price. Actual fills on Robinhood/broker typically 10–15% lower.<br>
+    * Credit and Max Profit already reduced by 25% from mid price to reflect realistic fills.<br>
     <strong style="color:#7a7870;">IV/HV</strong> = implied vol ÷ 30-day realized vol. Higher = options more overpriced vs actual movement = stronger selling edge.<br>
     <span style="color:#f0a500;">Orange</span> = strong edge (&gt;1.5x) &nbsp;·&nbsp; <span style="color:#3dba6e;">Green</span> = good edge (1.3–1.5x)<br>
     Always verify strikes and credits with your broker before trading. Not financial advice.
