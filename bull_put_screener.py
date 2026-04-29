@@ -25,7 +25,7 @@ GMAIL_PASS = os.environ.get("GMAIL_APP_PASSWORD")
 RECIPIENT  = os.environ.get("EMAIL_RECIPIENT")
 
 def get_manual_tickers():
-    """Verified 500+ Ticker List with correct syntax."""
+    """Audited Ticker List: Verified quotes and brackets."""
     return [
         'AAPL', 'MSFT', 'AMZN', 'NVDA', 'GOOGL', 'META', 'TSLA', 'BRK-B', 'UNH', 'JNJ',
         'XOM', 'V', 'PG', 'MA', 'AVGO', 'HD', 'CVX', 'ABBV', 'LLY', 'MRK', 'COST', 'PEP',
@@ -68,6 +68,119 @@ def get_manual_tickers():
         'ROP', 'ROST', 'RSG', 'RVTY', 'SBAC', 'SBNY', 'SBUX', 'SCHW', 'SEDG', 'SEE', 
         'SHW', 'SIVB', 'SJK', 'SNA', 'SO', 'SPG', 'SRE', 'STE', 'STT', 'STX', 'STZ', 
         'SWK', 'SWKS', 'SYF', 'SYY', 'TAP', 'TDG', 'TDY', 'TECH', 'TEL', 'TER', 'TFC', 
-        'TFX', 'TMUS', 'TPR', 'TRMB', 'TROW', 'TRV', 'TSCO', 'TSN', 'TT', 'TTWO', 
+        'TFX', 'TMUS', 'TPR', 'TRMB', 'TROW', 'TRV', 'TSCO', 'TSLA', 'TSN', 'TT', 'TTWO', 
         'TXT', 'TYL', 'UAL', 'UDR', 'UHS', 'ULTA', 'UNP', 'URI', 'VFC', 'VLO', 
-        'VMC', 'VNO', 'VRSK', 'VRSN', 'VTR
+        'VMC', 'VNO', 'VRSK', 'VRSN', 'VTR', 'VTRS', 'VZ', 'WAB', 'WAT', 'WBA', 'WBD', 
+        'WDC', 'WEC', 'WELL', 'WFC', 'WHR', 'WMB', 'WRB', 'WST', 'WTW', 'WY', 
+        'WYNN', 'XEL', 'XLY', 'XOM', 'XRAY', 'XYL', 'YUM', 'ZBH', 'ZBRA', 'ZION', 
+        'SPY', 'QQQ', 'IWM', 'DIA', 'SMH', 'XLF'
+    ]
+
+def bs_put_price(S, K, T, r, sigma):
+    if T <= 0 or sigma <= 0: return max(K - S, 0)
+    d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
+    d2 = d1 - sigma * np.sqrt(T)
+    return K * np.exp(-r * T) * norm.cdf(-d2) - S * norm.cdf(-d1)
+
+def bs_put_delta(S, K, T, r, sigma):
+    try:
+        d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
+        return norm.cdf(d1) - 1
+    except: return -0.5
+
+def implied_vol(market_price, S, K, T, r):
+    try:
+        def f(sigma): return bs_put_price(S, K, T, r, sigma) - market_price
+        return brentq(f, 0.001, 5.0, xtol=1e-4)
+    except: return None
+
+def run_screen():
+    tickers = get_manual_tickers()
+    today = datetime.today().date()
+    final_picks = []
+
+    print(f"--- STARTING SCAN ON {len(tickers)} TICKERS ---")
+
+    for i, ticker in enumerate(tickers):
+        try:
+            if ticker in ['MSFT', 'AMZN', 'GOOGL', 'META', 'AAPL']: continue
+
+            t = yf.Ticker(ticker)
+            hist = t.history(period='1y')
+            if len(hist) < 252: continue
+
+            returns = np.log(hist['Close'] / hist['Close'].shift(1)).dropna()
+            hv = returns.tail(30).std() * np.sqrt(252)
+            rolling_hv = returns.rolling(30).std().dropna() * np.sqrt(252)
+            ivr = ((hv - rolling_hv.min()) / (rolling_hv.max() - rolling_hv.min())) * 100
+            
+            if ivr < IVR_THRESHOLD: continue
+
+            exps = t.options
+            target_exp = next((e for e in exps if 28 <= (datetime.strptime(e, '%Y-%m-%d').date() - today).days <= 50), None)
+            if not target_exp: continue
+
+            chain = t.option_chain(target_exp)
+            S = hist['Close'].iloc[-1]
+            puts = chain.puts
+            
+            atm_put = puts.iloc[(puts['strike'] - S).abs().argsort()[:1]]
+            mid_atm = (atm_put['bid'].iloc[0] + atm_put['ask'].iloc[0]) / 2
+            iv_est = implied_vol(mid_atm, S, atm_put['strike'].iloc[0], 40/365, RISK_FREE_RATE)
+            
+            if not iv_est or (iv_est / hv) < IV_HV_RATIO: continue
+
+            for _, put in puts.iterrows():
+                K_short = put['strike']
+                if put['bid'] <= 0 or K_short >= S: continue
+                
+                delta = bs_put_delta(S, K_short, 40/365, RISK_FREE_RATE, iv_est)
+                if not (-0.40 <= delta <= -0.15): continue
+
+                for width in [2, 5, 10]:
+                    K_long = K_short - width
+                    l_row = puts[puts['strike'] == K_long]
+                    if l_row.empty: continue
+                    
+                    mid_s = (put['bid'] + put['ask']) / 2
+                    mid_l = (l_row.iloc[0]['bid'] + l_row.iloc[0]['ask']) / 2
+                    raw_credit = mid_s - mid_l
+                    final_credit = round(raw_credit * HAIRCUT_MULTIPLIER, 2)
+                    
+                    if (final_credit / width) >= MIN_CW_RATIO:
+                        print(f"  [FOUND] {ticker} - Credit: {final_credit}")
+                        final_picks.append({
+                            'Ticker': ticker, 'Price': round(S, 2), 'IVR': round(ivr, 1),
+                            'Short': K_short, 'Long': K_long, 'Width': width,
+                            'Credit': final_credit, 'CW_Pct': round((final_credit/width)*100, 1), 
+                            'Delta': abs(round(delta, 2))
+                        })
+                        break 
+        except: continue
+        if (i + 1) % 100 == 0: print(f"Progress: {i + 1}/{len(tickers)} scanned...")
+        
+    return final_picks
+
+def send_email(data):
+    if not data or not GMAIL_USER:
+        print("Scan finished. No candidates found or email not configured.")
+        return
+    
+    df = pd.DataFrame(data)
+    html_content = f"<html><body><h2>Option Scan Results</h2>{df.to_html(index=False)}</body></html>"
+    msg = MIMEMultipart()
+    msg['Subject'] = f"Option Report: {len(data)} Candidates"
+    msg.attach(MIMEText(html_content, 'html'))
+    
+    try:
+        with smtplib.SMTP('smtp.gmail.com', 587) as server:
+            server.starttls()
+            server.login(GMAIL_USER, GMAIL_PASS)
+            server.send_message(msg)
+            print("Email sent successfully.")
+    except Exception as e: 
+        print(f"Failed to send email: {e}")
+
+if __name__ == "__main__":
+    results = run_screen()
+    send_email(results)
