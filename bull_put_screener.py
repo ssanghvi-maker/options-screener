@@ -48,16 +48,40 @@ def implied_vol(market_price, S, K, T, r):
     except: return None
 
 # --- DATA FETCHING ---
+import requests
+
 def get_sp500_tickers():
-    """Fetches full S&P 500 from Wikipedia."""
+    """Fetches the full S&P 500 list with a User-Agent to prevent blocking."""
     try:
+        # Use a real browser User-Agent so Wikipedia doesn't block the request
         url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
-        df = pd.read_html(url)[0]
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        
+        response = requests.get(url, headers=headers)
+        tables = pd.read_html(response.text)
+        df = tables[0]
+        
+        # Clean symbols
         tickers = df['Symbol'].str.replace('.', '-', regex=False).tolist()
+        
+        # Add the core ETFs
         etfs = ['SPY', 'QQQ', 'IWM', 'DIA', 'SMH', 'XLF', 'XLE', 'XLK']
-        return sorted(list(set(tickers + etfs)))
-    except:
-        return ['SPY', 'QQQ', 'AAPL', 'MSFT', 'AMZN', 'NVDA']
+        full_list = sorted(list(set(tickers + etfs)))
+        
+        print(f"Successfully fetched {len(full_list)} tickers from Wikipedia.")
+        return full_list
+        
+    except Exception as e:
+        print(f"Wikipedia fetch failed: {e}. Trying secondary source...")
+        try:
+            # Secondary backup source (SlickCharts)
+            url = "https://www.slickcharts.com/sp500"
+            response = requests.get(url, headers=headers)
+            df = pd.read_html(response.text)[0]
+            return df['Symbol'].str.replace('.', '-', regex=False).tolist()
+        except:
+            # Final Fallback - Last resort
+            return ['SPY', 'QQQ', 'IWM', 'DIA', 'AAPL', 'MSFT', 'AMZN', 'NVDA', 'GOOGL', 'META']
 
 def get_vol_data(ticker_obj):
     """Calculates Current HV and IV Rank."""
