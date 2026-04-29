@@ -160,15 +160,24 @@ def run_screen():
 
             # GATE 3: OPTION MATH
             exps = t.options
-            target_exp, target_dte = None, None
+            target_exp = None
             for exp in exps:
                 dte = (datetime.strptime(exp, '%Y-%m-%d') - today).days
                 if 28 <= dte <= 50:
-                    target_exp, target_dte = exp, dte
+                    target_exp = exp
+                    target_dte = dte
                     break
-            if not target_exp: 
-                print(f"  [{ticker}] REJECT: No suitable DTE (28-50 days) available.")
+            
+            if not target_exp:
+                print(f"  [{ticker}] REJECT: No monthly options in 28-50d range.")
                 continue
+
+            earn_date, earn_flag = get_earnings_info(t)
+            if earn_date:
+                expiry_dt = datetime.strptime(target_exp, '%Y-%m-%d').date()
+                if today.date() <= earn_date <= expiry_dt:
+                    print(f"  [{ticker}] SKIP: Earnings ({earn_date}) is BEFORE Expiry ({target_exp})")
+                    continue
 
             chain = t.option_chain(target_exp)
             p = chain.puts.copy()
