@@ -11,33 +11,22 @@ import warnings
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
+# Suppress pandas/yfinance warnings for cleaner logs
 warnings.filterwarnings('ignore')
 
-# --- CONFIGURATION ---
+# --- CONFIGURATION (YOUR STRICT DISCIPLINE) ---
+HAIRCUT_MULTIPLIER = 0.60  # Your 40% reduction from Mid-price
+MIN_CW_RATIO       = 0.20  # Your 20% Credit/Width Floor after haircut
+IVR_THRESHOLD      = 50    # High Volatility Requirement
+IV_HV_RATIO        = 1.2   # Edge Requirement
+RISK_FREE_RATE     = 0.05
+
+# Email Settings (Optional)
 GMAIL_USER         = os.environ.get("GMAIL_USER", "your_email@gmail.com")
 GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "your_app_password")
 EMAIL_RECIPIENT    = os.environ.get("EMAIL_RECIPIENT", "your_email@gmail.com")
 
-HAIRCUT_MULTIPLIER = 0.60  # 40% reduction from MID
-MIN_CW_RATIO       = 0.20  # Minimum Credit/Width ratio after haircut
-RISK_FREE_RATE     = 0.05
-
-def get_sp500_tickers():
-    """Compilled list of Liquid Stocks & ETFs."""
-    return [
-        'SPY','QQQ','IWM','DIA','SMH','XLF','XLE','XLK', # ETFs (No earnings risk)
-        'AAPL','MSFT','AMZN','NVDA','GOOGL','META','TSLA','BRK-B','UNH','V','MA',
-        'JNJ','XOM','JPM','PG','AVGO','HD','CVX','LLY','ABBV','ADBE','COST','PEP',
-        'MRK','KO','TMO','WMT','ORCL','MCD','BAC','CSCO','PFE','ABT','CRM','AMD',
-        'ACN','LIN','NFLX','PM','TXN','ABNB','QCOM','DIS','INTU','INTC','AMGN',
-        'UNP','LOW','SPGI','HON','RTX','CAT','IBM','GE','GS','NEE','DE','BKNG',
-        'PLD','MDLZ','AMAT','TJX','ADP','ISRG','MMC','LRCX','VRTX','ADI','SCHW',
-        'MO','ZTS','LMT','SYK','CVS','ELV','CI','CB','ETN','SLB','MDT','AMT',
-        'EQIX','PGR','BDX','BSX','PANW','REGN','ITW','SNPS','KLAC','CDNS','CSX',
-        'MAR','WM','HCA','GD','ORLY','OXY','PLTR','SNOW','UBER','DASH','MELI'
-    ]
-
-# --- OPTION MATH ---
+# --- MATH ENGINE ---
 def bs_put_price(S, K, T, r, sigma):
     if T <= 0 or sigma <= 0: return max(K - S, 0)
     d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
@@ -55,181 +44,168 @@ def implied_vol(market_price, S, K, T, r):
     if T <= 0 or market_price <= 0: return None
     try:
         def f(sigma): return bs_put_price(S, K, T, r, sigma) - market_price
-        return brentq(f, 0.01, 5.0, xtol=1e-5)
+        return brentq(f, 0.001, 5.0, xtol=1e-4)
     except: return None
 
-# --- VOLATILITY & EARNINGS ---
-def get_hv_and_ivr(ticker_obj, window=30):
+# --- DATA FETCHING ---
+def get_sp500_tickers():
+    """Fetches full S&P 500 from Wikipedia."""
+    try:
+        url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
+        df = pd.read_html(url)[0]
+        tickers = df['Symbol'].str.replace('.', '-', regex=False).tolist()
+        etfs = ['SPY', 'QQQ', 'IWM', 'DIA', 'SMH', 'XLF', 'XLE', 'XLK']
+        return sorted(list(set(tickers + etfs)))
+    except:
+        return ['SPY', 'QQQ', 'AAPL', 'MSFT', 'AMZN', 'NVDA']
+
+def get_vol_data(ticker_obj):
+    """Calculates Current HV and IV Rank."""
     try:
         hist = ticker_obj.history(period='1y')
-        if len(hist) < window + 10: return None, None
-        returns = hist['Close'].pct_change().dropna()
-        hv_current = returns.tail(window).std() * np.sqrt(252)
-        rolling_hv = returns.rolling(window).std().dropna() * np.sqrt(252)
-        ivr = (hv_current - rolling_hv.min()) / (rolling_hv.max() - rolling_hv.min()) * 100
+        if len(hist) < 252: return None, None
+        returns = np.log(hist['Close'] / hist['Close'].shift(1)).dropna()
+        hv_current = returns.tail(30).std() * np.sqrt(252)
+        rolling_hv = returns.rolling(30).std().dropna() * np.sqrt(252)
+        min_v, max_v = rolling_hv.min(), rolling_hv.max()
+        ivr = ((hv_current - min_v) / (max_v - min_v)) * 100
         return hv_current, round(ivr, 1)
     except: return None, None
 
-def get_earnings_info(ticker_obj):
+def get_earnings_date(ticker_obj):
+    """Avoids stocks with earnings in the next 35 days."""
     try:
-        # Check for ETF to avoid 404
-        if ticker_obj.info.get('quoteType') == 'ETF':
-            return None, None
-            
+        if ticker_obj.info.get('quoteType') == 'ETF': return None
         cal = ticker_obj.calendar
-        if cal is None or (isinstance(cal, pd.DataFrame) and cal.empty): return None, None
+        if cal is None: return None
+        # Handle different calendar formats in yfinance
+        if isinstance(cal, pd.DataFrame) and not cal.empty:
+            e_date = cal.iloc[0, 0]
+        elif isinstance(cal, dict):
+            e_date = cal.get('Earnings Date', [None])[0]
+        else: return None
         
-        if isinstance(cal, dict): earn_date = cal.get('Earnings Date', [None])[0]
-        else: earn_date = cal.columns[0] if hasattr(cal, 'columns') else cal.iloc[0,0]
-        
-        if hasattr(earn_date, 'date'): earn_date = earn_date.date()
-        today = datetime.today().date()
-        days_to = (earn_date - today).days
-        
-        if days_to < 0: return earn_date, f"JUST REPORTED ({abs(days_to)}d ago)"
-        return earn_date, f"EARNINGS IN {days_to}d"
-    except:
-        return None, None
+        if hasattr(e_date, 'date'): return e_date.date()
+        return None
+    except: return None
 
+# --- SCANNING LOGIC ---
 def find_best_spread(S, iv_for_delta, T, puts):
-    """Calculates all spreads and applies the 40% haircut math."""
+    """Applies your 40% haircut and 20% C/W floor."""
     for _, put in puts.iterrows():
         K_short = put['strike']
         if put['bid'] <= 0 or put['ask'] <= 0: continue
-        short_mid = (put['bid'] + put['ask']) / 2
         
+        # Check Delta (targeting 25-35 range)
         delta = bs_put_delta(S, K_short, T, RISK_FREE_RATE, iv_for_delta)
-        if delta is None or not (0.22 <= abs(delta) <= 0.40): continue
+        if delta is None or not (-0.40 <= delta <= -0.20): continue
 
         for width in [2, 3, 5, 10]:
             K_long = K_short - width
-            long_rows = puts[puts['strike'] == K_long]
-            if long_rows.empty or long_rows.iloc[0]['bid'] <= 0: continue
+            long_row = puts[puts['strike'] == K_long]
+            if long_row.empty or long_row.iloc[0]['bid'] <= 0: continue
             
-            long_mid = (long_rows.iloc[0]['bid'] + long_rows.iloc[0]['ask']) / 2
-            credit_raw = short_mid - long_mid
+            mid_short = (put['bid'] + put['ask']) / 2
+            mid_long = (long_row.iloc[0]['bid'] + long_row.iloc[0]['ask']) / 2
+            raw_credit = mid_short - mid_long
             
-            # THE HAIRCUT CALCULATION
-            credit = round(credit_raw * HAIRCUT_MULTIPLIER, 2)
-            credit_ratio = credit / width
-            breakeven = K_short - credit
-            buffer_pct = (S - breakeven) / S * 100
-
-            if credit_ratio >= MIN_CW_RATIO and buffer_pct >= 5:
+            # --- THE 40% HAIRCUT ---
+            final_credit = round(raw_credit * HAIRCUT_MULTIPLIER, 2)
+            cw_ratio = final_credit / width
+            
+            if cw_ratio >= MIN_CW_RATIO:
                 return {
                     'short_strike': K_short, 'long_strike': K_long, 'width': width,
-                    'delta': round(abs(delta), 2), 'credit': credit, 'credit_ratio': round(credit_ratio*100, 1),
-                    'buffer': round(buffer_pct, 1), 'max_profit': int(credit * 100),
-                    'max_loss': int((width - credit) * 100), 'breakeven': round(breakeven, 2)
+                    'credit': final_credit, 'cw_pct': round(cw_ratio*100, 1),
+                    'delta': round(abs(delta), 2), 'be': round(K_short - final_credit, 2)
                 }
     return None
 
-# --- MAIN SCREENER ---
 def run_screen():
-    today = datetime.today()
-    results = []
     tickers = get_sp500_tickers()
+    results = []
+    today = datetime.today().date()
     print(f"--- STARTING SCAN: {len(tickers)} TICKERS ---")
 
-    for ticker in tickers:
+    for i, ticker in enumerate(tickers, 1):
         try:
             t = yf.Ticker(ticker)
             hist = t.history(period='5d')
             if hist.empty: continue
             S = hist['Close'].iloc[-1]
 
-            # GATE 1: EARNINGS
-            earn_date, earn_flag = get_earnings_info(t)
+            # 1. EARNINGS FILTER
+            earn_date = get_earnings_date(t)
             if earn_date:
-                # Assuming standard monthly expiry if no options found yet
-                expiry_target = datetime(2026, 5, 29).date() 
-                if today.date() <= earn_date <= expiry_target:
-                    print(f"  [{ticker}] SKIP: Earnings ({earn_date}) inside window.")
+                days_to = (earn_date - today).days
+                if 0 <= days_to <= 35:
+                    print(f"  [{ticker}] SKIP: Earnings in {days_to} days.")
                     continue
 
-            # AUDIT: Passed Earnings
-            print(f"  [{ticker}] PASSED Earnings Filter. Price: ${round(S,2)}")
-
-            # GATE 2: VOLATILITY
-            hv, ivr = get_hv_and_ivr(t)
-            if ivr is None or ivr < 50:
-                print(f"  [{ticker}] REJECT: IV Rank is {ivr}% (Need > 50%)")
+            # 2. VOLATILITY GATES
+            hv, ivr = get_vol_data(t)
+            if ivr is None or ivr < IVR_THRESHOLD:
+                if i % 10 == 0: print(f"  [{ticker}] REJECT: IV Rank ({ivr}%) below {IVR_THRESHOLD}%.")
                 continue
             
-            print(f"  [{ticker}] PASSED Volatility check (IVR: {ivr}%). Analyzing chains...")
+            print(f"  [{ticker}] PASSED Volatility (IVR: {ivr}%). Searching for spreads...")
 
-            # GATE 3: OPTION MATH
+            # 3. EXPIRATION SELECTION (28-50 Days)
             exps = t.options
             target_exp = None
             for exp in exps:
-                dte = (datetime.strptime(exp, '%Y-%m-%d') - today).days
+                dte = (datetime.strptime(exp, '%Y-%m-%d').date() - today).days
                 if 28 <= dte <= 50:
-                    target_exp = exp
-                    target_dte = dte
+                    target_exp, target_dte = exp, dte
                     break
             
-            if not target_exp:
-                print(f"  [{ticker}] REJECT: No monthly options in 28-50d range.")
-                continue
+            if not target_exp: continue
 
-            earn_date, earn_flag = get_earnings_info(t)
-            if earn_date:
-                expiry_dt = datetime.strptime(target_exp, '%Y-%m-%d').date()
-                if today.date() <= earn_date <= expiry_dt:
-                    print(f"  [{ticker}] SKIP: Earnings ({earn_date}) is BEFORE Expiry ({target_exp})")
-                    continue
-
+            # 4. SPREAD CALCULATION
             chain = t.option_chain(target_exp)
-            p = chain.puts.copy()
-            p['dist'] = abs(p['strike'] - S)
-            atm_put = p.nsmallest(1, 'dist').iloc[0]
-            atm_iv = implied_vol((atm_put['bid']+atm_put['ask'])/2, S, atm_put['strike'], target_dte/365, RISK_FREE_RATE)
+            puts = chain.puts
+            # Estimate ATM IV for Delta calculation
+            atm_put = puts.iloc[(puts['strike'] - S).abs().argsort()[:1]]
+            mid_atm = (atm_put['bid'].iloc[0] + atm_put['ask'].iloc[0]) / 2
+            iv_est = implied_vol(mid_atm, S, atm_put['strike'].iloc[0], target_dte/365, RISK_FREE_RATE)
             
-            if not atm_iv or (atm_iv / hv) < 1.2:
-                print(f"  [{ticker}] REJECT: IV/HV ratio too low (No edge).")
+            if not iv_est or (iv_est / hv) < IV_HV_RATIO:
+                print(f"  [{ticker}] REJECT: IV/HV ratio ({round(iv_est/hv,2) if iv_est else 0}) below {IV_HV_RATIO}.")
                 continue
 
-            spread = find_best_spread(S, atm_iv, target_dte/365, chain.puts)
+            spread = find_best_spread(S, iv_est, target_dte/365, puts)
             if spread:
-                results.append({'ticker': ticker, 'price': round(S, 2), 'ivr': ivr, 'iv_hv': round(atm_iv/hv, 2), 
-                                'dte': target_dte, 'expiry': target_exp, 'earnings': earn_flag or 'N/A', **spread})
-                print(f"  [{ticker}] *** SUCCESS *** Spread found at ${spread['short_strike']}")
+                print(f"  [{ticker}] *** SUCCESS! Spread Found ***")
+                results.append({'ticker': ticker, 'price': round(S,2), 'ivr': ivr, 'expiry': target_exp, **spread})
             else:
-                print(f"  [{ticker}] REJECT: No spread met 20% C/W ratio after 40% haircut.")
-            
-            time.sleep(0.1)
+                print(f"  [{ticker}] REJECT: No spread met {int(MIN_CW_RATIO*100)}% C/W after 40% haircut.")
+
         except Exception as e:
-            print(f"  [{ticker}] ERROR: {e}")
             continue
-    
-    results.sort(key=lambda x: -x['iv_hv'])
+        
+        if i % 50 == 0: print(f"Progress: {i}/{len(tickers)} tickers complete...")
+
     return results
 
-def send_email(results):
+# --- EMAIL FUNCTION ---
+def send_report(results):
     if not results:
-        print("\nScreen complete. No trades met high-conviction criteria today.")
+        print("\nNo high-conviction trades found today.")
         return
+
+    msg = MIMEMultipart(); msg["Subject"] = f"Trade Alerts: {len(results)} Found"; msg["From"] = GMAIL_USER; msg["To"] = EMAIL_RECIPIENT
+    body = f"High Conviction Bull Put Spreads (Rules: 40% Haircut, 20% C/W floor, IVR > 50)\n\n"
+    df_res = pd.DataFrame(results)
+    body += df_res.to_string(index=False)
+    msg.attach(MIMEText(body, 'plain'))
     
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = f"Bull Put Ops - {len(results)} Found - {datetime.today().strftime('%Y-%m-%d')}"
-    msg["From"], msg["To"] = GMAIL_USER, EMAIL_RECIPIENT
-    
-    html = f"<html><body style='background:#0a0c0f;color:#eee;padding:20px;font-family:sans-serif;'><h2>Bull Put Screener</h2>"
-    html += "<table border='1' style='border-collapse:collapse;width:100%;'><tr><th>Ticker</th><th>Price</th><th>IVR</th><th>Strikes</th><th>Credit*</th><th>C/W%</th><th>Buffer</th><th>Earnings</th></tr>"
-    for r in results:
-        html += f"<tr><td>{r['ticker']}</td><td>{r['price']}</td><td>{r['ivr']}%</td><td>{r['short_strike']}/{r['long_strike']}</td><td>${r['credit']}</td><td>{r['credit_ratio']}%</td><td>{r['buffer']}%</td><td>{r['earnings']}</td></tr>"
-    html += "</table><p style='font-size:10px;'>*40% Haircut applied. Earnings excluded for stocks.</p></body></html>"
-    
-    msg.attach(MIMEText(html, "html"))
     try:
-        with smtplib.SMTP("smtp.gmail.com", 587) as server:
-            server.starttls()
-            server.login(GMAIL_USER, GMAIL_APP_PASSWORD)
-            server.send_message(msg)
-        print("\nEmail Sent Successfully.")
-    except Exception as e:
-        print(f"\nEmail failed: {e}")
+        server = smtplib.SMTP("smtp.gmail.com", 587); server.starttls(); server.login(GMAIL_USER, GMAIL_APP_PASSWORD)
+        server.send_message(msg); server.quit()
+        print("\nReport Emailed Successfully.")
+    except:
+        print("\nEmail failed. Check your GMAIL_APP_PASSWORD.")
 
 if __name__ == "__main__":
-    data = run_screen()
-    send_email(data)
+    found_trades = run_screen()
+    send_report(found_trades)
