@@ -81,7 +81,32 @@ def get_sp500_tickers():
             return df['Symbol'].str.replace('.', '-', regex=False).tolist()
         except:
             # Final Fallback - Last resort
-            return ['SPY', 'QQQ', 'IWM', 'DIA', 'AAPL', 'MSFT', 'AMZN', 'NVDA', 'GOOGL', 'META']
+            return [
+'AAPL','MSFT','NVDA','AMZN','GOOGL','META','TSLA','AVGO','AMD','NFLX',
+'ADBE','CRM','ORCL','INTU','QCOM','TXN','AMAT','LRCX','KLAC','ADI',
+
+'JPM','GS','MS','BAC','C','WFC','SCHW','BLK','AXP','SPGI',
+'ICE','CME','COF','USB','PNC',
+
+'XOM','CVX','OXY','SLB','EOG','COP','PSX','VLO','MPC','HAL',
+
+'LLY','UNH','JNJ','MRK','ABBV','PFE','TMO','DHR','BMY','AMGN',
+'ISRG','SYK','MDT','ZTS','VRTX',
+
+'CAT','DE','GE','HON','ETN','PH','ITW','MMM','GD','LMT',
+'BA','NOC','EMR','ROK','OTIS',
+
+'COST','WMT','HD','LOW','MCD','SBUX','NKE','TJX','TGT',
+'BKNG','ABNB','RCL','MAR','HLT',
+
+'PLTR','SNOW','CRWD','PANW','DDOG','NET','ZS','MDB','OKTA','TEAM',
+'SHOP','UBER','LYFT','DASH','RIVN','LCID',
+
+'MRVL','NXPI','ON','INTC','MPWR',
+
+'PLD','AMT','CCI','EQIX','O','PSA','SPG','DLR',
+
+'SPY','QQQ','IWM','XLF','XLE','XLK','XLV','SMH','ARKK','DIA']
 
 def get_vol_data(ticker_obj):
     """Calculates Current HV and IV Rank."""
@@ -162,7 +187,7 @@ def run_screen():
             earn_date = get_earnings_date(t)
             if earn_date:
                 days_to = (earn_date - today).days
-                if -1 <= days_to <= 35:
+                if -2 <= days_to <= 35:
                     print(f"  [{ticker}] SKIP: Earnings in {days_to} days.")
                     continue
 
