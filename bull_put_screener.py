@@ -176,14 +176,19 @@ def send_email(data):
         with smtplib.SMTP('smtp.gmail.com', 587) as server:
             server.starttls()
             server.login(GMAIL_USER, GMAIL_PASS)
-            # send_message returns an empty dict on 100% success
+            
+            # send_message returns a dict of failures. 
+            # If it's empty ({}), the email was 100% successful.
             errors = server.send_message(msg)
+            
             if not errors:
                 print("✅ Email sent successfully!")
             else:
-                print(f"⚠️ Partial failure: {errors}")
+                print(f"⚠️ Email sent, but these addresses failed: {errors}")
+                
     except Exception as e: 
-        print(f"❌ Actual Connection Error: {e}")
+        # This will now only catch REAL errors (like wrong passwords)
+        print(f"❌ SMTP Connection Error: {e}")
 
 if __name__ == "__main__":
     results = run_screen()
