@@ -172,19 +172,31 @@ def send_email(data):
     msg['Subject'] = f"Option Report: {len(data)} Candidates"
     msg.attach(MIMEText(html_content, 'html'))
     
+    def send_email(data):
+    if not data or not GMAIL_USER:
+        print("Scan finished. No candidates found or email not configured.")
+        return
+    
+    # ... (Keep your existing MIME setup here) ...
+    
     try:
+        # Using a context manager ensures the connection closes properly
         with smtplib.SMTP('smtp.gmail.com', 587) as server:
             server.starttls()
             server.login(GMAIL_USER, GMAIL_PASS)
             
-            # send_message returns a dict of failures. 
-            # If it's empty ({}), the email was 100% successful.
-            errors = server.send_message(msg)
+            # This returns a dict of failed deliveries
+            failed_deliveries = server.send_message(msg)
             
-            if not errors:
-                print("✅ Email sent successfully!")
+            if not failed_deliveries:
+                print("✅ SUCCESS: Email sent to", RECIPIENT)
             else:
-                print(f"⚠️ Email sent, but these addresses failed: {errors}")
+                print(f"⚠️ Warning: Delivery failed for: {failed_deliveries}")
+                
+    except smtplib.SMTPException as e:
+        print(f"❌ SMTP Error: {e}")
+    except Exception as e:
+        print(f"❌ General Error: {e}")
                 
     except Exception as e: 
         # This will now only catch REAL errors (like wrong passwords)
